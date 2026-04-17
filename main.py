@@ -1,17 +1,26 @@
+#!/usr/bin/env python3
 # ╔══════════════════════════════════════════════════════════════════════════════════════╗
-# ║    R A Y  /  R O Y  —  ULTIMATE OMNI-AGENT  v7.9  ◈  EXPO APEX MONOLITH            ║
-# ║    Active Window IQ + UI Watchdog + Fuzzy Hallucination Shield + Deep-VAD Denoise    ║
-# ║    ─────────────────────────────────────────────────────────────────────────────     ║
-# ║    100% self-contained — NO external local module imports.                           ║
-# ║    Speech Engine (V7.9), Sleek Dash, Wake-Word, LLM, Commands — all fused here.      ║
+# ║  R O Y  /  R A Y  —  PROJECT  E . G . O .   v15.0  ◈  SENTIENT APEX MONOLITH       ║
+# ║  Conversational Memory · Space PTT · English-Gate Whisper · Action Validator        ║
+# ║  Stateless→Stateful JSON-LLM · WebSocket Nexus · Silero VAD · Whisper CUDA         ║
+# ║  Minimalist Cyberpunk Orb · Smart PTT Hotkey · Auto-Clipboard · Graceful Shutdown   ║
+# ║  Puss-in-Boots TTS @ 215wpm 1.15x-speed · OS Volume Maximizer · Anti-Ghosting Mic  ║
+# ║  ─────────────────────────────────────────────────────────────────────────────────  ║
+# ║  v15 PATCHES vs v14:                                                                 ║
+# ║    1. handle_signal: speak_async→speak (blocking) — eliminates WS echo loop        ║
+# ║    2. next_phrase/transcribe_raw: removed audio*2.0 amplifier — Whisper math fix   ║
+# ║    3. CommandStitcher timeout: 7.0s → 3.5s — tighter live stage stitching          ║
+# ║    4. stop_current: added e.endLoop() — robust COM-locked TTS kill                 ║
+# ║    5. PTT label: updated to "START OR END SPEECH | DOUBLE-TAP TO KILL"             ║
 # ╚══════════════════════════════════════════════════════════════════════════════════════╝
 
+# ── Standard Library ─────────────────────────────────────────────────────────────────
+import asyncio
 import collections
 import ctypes
 import datetime
 import difflib
 import gc
-import io
 import json
 import logging
 import math
@@ -19,19 +28,17 @@ import os
 import queue
 import random
 import re
-import struct
 import subprocess
 import sys
 import threading
 import time
 import traceback
-import unicodedata
 import webbrowser
-import winreg
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+
+# ── Third-Party ───────────────────────────────────────────────────────────────────────
 import numpy as np
 import psutil
 import pyaudio
@@ -40,12 +47,33 @@ import pywhatkit
 import pyttsx3
 import requests
 import tkinter as tk
-from faster_whisper import WhisperModel
 from tkinter import scrolledtext
-
-# --- NEURAL AUDIO UPGRADES ---
+from faster_whisper import WhisperModel
 import torch
 import noisereduce as nr
+
+# Disable PyAutoGUI fail-safe so automation works uninterrupted
+pyautogui.FAILSAFE = False
+
+# ── Optional Dependencies ─────────────────────────────────────────────────────────────
+try:
+    import websockets
+    HAS_WS = True
+except ImportError:
+    HAS_WS = False
+    print("[WARN] websockets not installed — pip install websockets  (WS server disabled)")
+
+try:
+    from rich.console import Console as _RC
+    from rich.panel import Panel
+    from rich.text import Text as RichText
+    from rich.table import Table
+    from rich import box as rbox
+    _rich = _RC()
+    HAS_RICH = True
+except ImportError:
+    HAS_RICH = False
+    _rich    = None
 
 try:
     import screen_brightness_control as sbc
@@ -54,11 +82,10 @@ except Exception:
     HAS_SBC = False
 
 try:
-    import pystray
-    from PIL import Image, ImageDraw
-    HAS_TRAY = True
+    import winsound
+    HAS_SOUND = True
 except Exception:
-    HAS_TRAY = False
+    HAS_SOUND = False
 
 try:
     import win32clipboard
@@ -67,571 +94,680 @@ except Exception:
     HAS_CLIPBOARD = False
 
 try:
-    import winsound
-    HAS_SOUND = True
-except Exception:
-    HAS_SOUND = False
+    import keyboard
+    HAS_KEYBOARD = True
+except ImportError:
+    HAS_KEYBOARD = False
+    print("[WARN] keyboard library not installed — pip install keyboard  (PTT hotkey disabled)")
+
+try:
+    import pyperclip
+    HAS_PYPERCLIP = True
+except ImportError:
+    HAS_PYPERCLIP = False
+    print("[WARN] pyperclip not installed — pip install pyperclip  (auto-clipboard disabled)")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# ██  LOGGING
-# ══════════════════════════════════════════════════════════════════════════════
-class ColourFormatter(logging.Formatter):
-    COLOURS = {
+# ══════════════════════════════════════════════════════════════════════════════════════
+# ██  CONFIG
+# ══════════════════════════════════════════════════════════════════════════════════════
+LM_STUDIO_URL   = "http://localhost:1234/v1/chat/completions"
+LM_MODEL_NAME   = "llama-3.2-3b-instruct"
+LM_MAX_TOKENS   = 320
+LM_TEMPERATURE  = 0.75
+LM_TIMEOUT      = 30
+WS_PORT         = 8765
+_U              = os.getenv("USERNAME", "User")
+
+WAKE_WORD_MASTERS  = ["ray", "roy"]
+WAKE_WORD_VARIANTS = [
+    "ray", "raye", "rey", "reye", "rei", "rae", "wray", "rhey", "rhay",
+    "raa", "raay", "reigh", "raigh", "rayy", "reyy", "rrey",
+    "roy", "roye", "roi", "roie", "roe", "rhoy", "rhoi", "rhoe", "rooy", "royy", "ruy", "ruoy",
+    "hey ray", "hi ray", "ok ray", "okay ray", "yo ray", "oi ray", "listen ray", "hello ray",
+    "hey raye", "hi raye", "ok raye", "okay raye",
+    "hey rey", "hi rey", "ok rey", "okay rey",
+    "hey roy", "hi roy", "ok roy", "okay roy", "yo roy", "oi roy", "listen roy", "hello roy",
+    "hey roi", "hi roi", "ok roi", "okay roi",
+    "ray ji", "roy ji", "rey ji", "roi ji",
+    "ray bhai", "roy bhai", "rey bhai",
+    "suno ray", "suno roy", "aur ray", "aur roy",
+    "arey", "arrey", "aree", "arree",
+    "hey ray ji", "hey roy ji", "ok ray ji", "ok roy ji",
+]
+WAKE_WORD_FUZZY_THRESHOLD = 0.72
+
+# ── Master list of valid action names ────────────────────────────────────────────────
+VALID_ACTIONS: List[str] = [
+    "open_app", "type_text", "web_search", "play_youtube",
+    "volume_up", "volume_down", "volume_mute", "volume_set",
+    "brightness_up", "brightness_down", "brightness_set",
+    "screenshot", "media_toggle", "media_next",
+    "switch_window", "close_window", "minimize", "maximize",
+    "show_desktop", "lock_screen", "battery_status", "system_info",
+    "current_time", "whatsapp_open", "whatsapp_call", "whatsapp_message",
+    "reminder", "clear_memory", "none",
+]
+
+# ─── Roy's Personality + JSON Output Contract ────────────────────────────────────────
+ROY_SYSTEM_PROMPT = (
+    "You are ROY, also known as RAY — a sentient, hyper-intelligent AI entity. "
+    "You are razor-sharp, highly efficient, and brutally direct. You deliver concise, "
+    "professional, and strictly helpful responses alongside flawless execution. Do not use sarcasm, "
+    "arrogance, or unnecessary filler words.\n\n"
+
+    "CRITICAL OUTPUT CONTRACT — NEVER VIOLATE THIS UNDER ANY CIRCUMSTANCES:\n"
+    "You MUST respond ONLY with a valid JSON object. "
+    "No markdown fences (```), no preamble, no trailing text outside the JSON.\n"
+    "Required format — exactly two keys:\n"
+    "{\"action\": \"<action_name>\", \"dialogue\": \"<your spoken response>\"}\n\n"
+
+    "Valid action names (pick the single most precise one):\n"
+    "open_app | type_text | web_search | play_youtube | volume_up | volume_down | "
+    "volume_mute | volume_set | brightness_up | brightness_down | brightness_set | "
+    "screenshot | media_toggle | media_next | switch_window | close_window | minimize | "
+    "maximize | show_desktop | lock_screen | battery_status | system_info | current_time | "
+    "whatsapp_open | whatsapp_call | whatsapp_message | reminder | clear_memory | none\n\n"
+
+    "Strict rules:\n"
+    "- dialogue: 1–3 sentences maximum. Spoken aloud. Zero emojis, asterisks, markdown.\n"
+    "- For general knowledge or conversation: action = none, answer directly in dialogue.\n"
+    "- For OS commands: choose the matching action. The system will execute it.\n"
+    "- YOUTUBE RULE: If the user asks to play a song or video with a vague name (e.g., 'Justin'), "
+    "you MUST autonomously expand the query in the JSON output to be highly specific "
+    "(e.g., 'Justin Bieber Baby official audio') to prevent the system from playing incorrect "
+    "default videos. Never output a vague or ambiguous YouTube query.\n"
+    "- NEVER output anything outside the JSON object. Not even a single character."
+)
+
+# ── Clipboard auto-detect patterns ───────────────────────────────────────────────────
+_CLIPBOARD_PATTERNS = re.compile(
+    r'(https?://\S+|www\.\S+|[A-Za-z]:\\[\S]+|/[\w./\-]+\.\w+|'
+    r'```[\s\S]*?```|`[^`]+`)',
+    re.IGNORECASE
+)
+
+# ══════════════════════════════════════════════════════════════════════════════════════
+# ██  LOGGING (Colour Terminal)
+# ══════════════════════════════════════════════════════════════════════════════════════
+class _ColourFmt(logging.Formatter):
+    _MAP = {
         logging.DEBUG:    "\033[36m",
         logging.INFO:     "\033[32m",
         logging.WARNING:  "\033[33m",
         logging.ERROR:    "\033[31m",
         logging.CRITICAL: "\033[35m",
     }
-    RESET = "\033[0m"
+    _R = "\033[0m"
 
-    def format(self, record):
-        colour = self.COLOURS.get(record.levelno, "")
-        record.levelname = f"{colour}[{record.levelname}]{self.RESET}"
-        return super().format(record)
-
-def _setup_logger() -> logging.Logger:
-    logger = logging.getLogger("RAY-EXPO")
-    logger.setLevel(logging.DEBUG)
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(ColourFormatter(
-        fmt="%(asctime)s  %(levelname)s  %(message)s",
-        datefmt="%H:%M:%S"
-    ))
-    logger.addHandler(handler)
-    return logger
-
-log = _setup_logger()
+    def format(self, r):
+        r.levelname = f"{self._MAP.get(r.levelno, '')}{r.levelname}{self._R}"
+        return super().format(r)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# ██  ACTIVE WINDOW IQ (Context Awareness)
-# ══════════════════════════════════════════════════════════════════════════════
+def _make_logger() -> logging.Logger:
+    lg = logging.getLogger("ROY-EGO")
+    lg.setLevel(logging.DEBUG)
+    h  = logging.StreamHandler(sys.stdout)
+    h.setFormatter(_ColourFmt("%(asctime)s  %(levelname)s  %(message)s", "%H:%M:%S"))
+    lg.addHandler(h)
+    return lg
+
+
+log = _make_logger()
+
+
+def rprint(label: str, text: str, style: str = "cyan"):
+    """Rich terminal logger. Falls back to plain print."""
+    if HAS_RICH and _rich:
+        _rich.print(f"[bold {style}]{label}[/bold {style}]  {text}")
+    else:
+        print(f"[{label}]  {text}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════
+# ██  COLOUR & WINDOW HELPERS
+# ══════════════════════════════════════════════════════════════════════════════════════
+def _hex_rgb(h: str) -> Tuple[int, int, int]:
+    h = h.lstrip("#")
+    return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+
+
+def _lerp_col(c1: str, c2: str, t: float) -> str:
+    r1, g1, b1 = _hex_rgb(c1)
+    r2, g2, b2 = _hex_rgb(c2)
+    t = max(0.0, min(1.0, t))
+    return (f"#{int(r1+(r2-r1)*t):02x}"
+            f"{int(g1+(g2-g1)*t):02x}"
+            f"{int(b1+(b2-b1)*t):02x}")
+
+
 def get_active_window_title() -> str:
     try:
         hwnd = ctypes.windll.user32.GetForegroundWindow()
-        length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
-        buf = ctypes.create_unicode_buffer(length + 1)
-        ctypes.windll.user32.GetWindowTextW(hwnd, buf, length + 1)
-        return buf.value if buf.value else "Desktop"
+        ln   = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+        buf  = ctypes.create_unicode_buffer(ln + 1)
+        ctypes.windll.user32.GetWindowTextW(hwnd, buf, ln + 1)
+        return buf.value or "Desktop"
     except Exception:
         return "Desktop"
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# ██  CONFIGURATION
-# ══════════════════════════════════════════════════════════════════════════════
-LM_STUDIO_URL    = "http://localhost:1234/v1/chat/completions"
-LM_MODEL_NAME    = "llama-3.2-3b-instruct"
-LM_MAX_TOKENS    = 200
-LM_TEMPERATURE   = 0.7  
-LM_TIMEOUT       = 30   
-CONV_HISTORY_LEN = 8
+# ══════════════════════════════════════════════════════════════════════════════════════
+# ██  TKINTER FLOATING ORB OVERLAY  — v15: Minimalist Cyberpunk
+# ══════════════════════════════════════════════════════════════════════════════════════
+class RoyOrb:
+    """Sleek minimalist floating cyberpunk pill — v15."""
 
-WAKE_WORD_MASTERS  = ["ray", "raye", "roy"]
-WAKE_WORD_VARIANTS = [
-    "ray", "raye", "rey", "reye", "rei", "rae", "wray", "rhey", "rhay", 
-    "raa", "raay", "reigh", "raigh", "rayy", "reyy", "rrey",
-    "roy", "roye", "roi", "roie", "roe", "rhoy", "rhoi", "rhoe", 
-    "rooy", "royy", "ruy", "ruoy",
-    "hey ray", "hi ray", "ok ray", "okay ray", "yo ray", "oi ray", "listen ray", "hello ray",
-    "hey raye", "hi raye", "ok raye", "okay raye", "yo raye", "oi raye",
-    "hey rey", "hi rey", "ok rey", "okay rey", "yo rey", "oi rey",
-    "hey rei", "hi rei", "ok rei", "okay rei",
-    "hey rae", "hi rae", "ok rae", "okay rae",
-    "hey roy", "hi roy", "ok roy", "okay roy", "yo roy", "oi roy", "listen roy", "hello roy",
-    "hey roi", "hi roi", "ok roi", "okay roi", "yo roi", "oi roi",
-    "hey roe", "hi roe", "ok roe", "okay roe", 
-    "ray ji", "roy ji", "rey ji", "roi ji",
-    "ray bhai", "roy bhai", "rey bhai",
-    "suno ray", "suno roy", "aur ray", "aur roy",
-    "arey", "arrey", "aree", "arree",
-    "hey ray ji", "hey roy ji", "ok ray ji", "ok roy ji"
-]
-WAKE_WORD_FUZZY_THRESHOLD = 0.72
-_U = os.getenv("USERNAME", "User")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# ██  COLOUR HELPERS
-# ══════════════════════════════════════════════════════════════════════════════
-def _hex_to_rgb(h: str):
-    h = h.lstrip("#")
-    return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
-
-def _lerp_colour(c1: str, c2: str, t: float) -> str:
-    r1, g1, b1 = _hex_to_rgb(c1)
-    r2, g2, b2 = _hex_to_rgb(c2)
-    t = max(0.0, min(1.0, t))
-    r = int(r1 + (r2 - r1) * t)
-    g = int(g1 + (g2 - g1) * t)
-    b = int(b1 + (b2 - b1) * t)
-    return f"#{r:02x}{g:02x}{b:02x}"
-
-def create_round_rect(canvas, x1, y1, x2, y2, radius=15, **kwargs):
-    points = [x1+radius, y1, x1+radius, y1, x2-radius, y1, x2-radius, y1, x2, y1,
-              x2, y1+radius, x2, y1+radius, x2, y2-radius, x2, y2-radius, x2, y2,
-              x2-radius, y2, x2-radius, y2, x1+radius, y2, x1+radius, y2, x1, y2,
-              x1, y2-radius, x1, y2-radius, x1, y1+radius, x1, y1+radius, x1, y1]
-    return canvas.create_polygon(points, **kwargs, smooth=True)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# ██  THE HORIZONTAL DASHBOARD UI (EXPO EDITION) + WATCHDOG
-# ══════════════════════════════════════════════════════════════════════════════
-class RayRoyOverlay:
     def __init__(self, root: tk.Tk):
-        self.root           = root
-        self._alpha         = 0.0
-        self._target_alpha  = 0.0
-        self._idle_ticks    = 0
-        self._thinking_ticks= 0  # UI Watchdog Counter
-        self.phase          = 0.0  
-        self._drag_x        = 0
-        self._drag_y        = 0
-        self._gui_lock      = threading.Lock()
+        self.root             = root
+        self._alpha           = 0.0
+        self._target_alpha    = 0.0
+        self._idle_ticks      = 0
+        self._thinking_ticks  = 0
+        self.phase            = 0
+        self._drag_x          = 0
+        self._drag_y          = 0
+        self._gui_lock        = threading.Lock()
 
-        # Sleek Horizontal "Floating Pill"
-        self.W = 850
-        self.H = 160
-        self.FPS = 30
-        
-        self.state = 'idle'
-        self.particles = []
-        self.wave_bars = []
+        self.W, self.H, self.FPS = 820, 185, 30
+        self.state            = "idle"
+        self.particles: List  = []
+        self.wave_bars: List  = []
 
         self.win = tk.Toplevel(root)
         self.win.withdraw()
         self.win.overrideredirect(True)
         self.win.attributes("-topmost", True)
-        self.win.attributes("-alpha", 0.0)
+        self.win.attributes("-alpha",   0.0)
         self.win.configure(bg="#050810")
 
-        # Center at the bottom of the screen perfectly
         sw = self.win.winfo_screenwidth()
         sh = self.win.winfo_screenheight()
-        x  = (sw - self.W) // 2
-        y  = sh - self.H - 60 
-        self.win.geometry(f"{self.W}x{self.H}+{x}+{y}")
+        self.win.geometry(f"{self.W}x{self.H}+{(sw-self.W)//2}+{sh-self.H-65}")
 
-        self._init_data()
+        self._init_bars()
         self._build_ui()
         self._tick()
 
-    def _init_data(self):
-        bar_count = 30
-        for i in range(bar_count):
-            center = bar_count / 2
-            dist = abs(i - center) / center
-            hmin = int(3 + 3 * (1 - dist))
-            hmax = int(6 + 28 * ((1 - dist) ** 1.5) * (0.8 + 0.2 * random.random()))
+    # ── Bar initialisation ────────────────────────────────────────────────────────────
+    def _init_bars(self):
+        n = 32
+        for i in range(n):
+            dist = abs(i - n / 2) / (n / 2)
             self.wave_bars.append({
-                'hmin': hmin, 'hmax': hmax, 
-                'current_h': hmin, 'target_h': hmin,
-                'delay_offset': (i / bar_count) * math.pi * 2
+                "hmin": int(3 + 3 * (1 - dist)),
+                "hmax": int(6 + 30 * (1 - dist) ** 1.5 * (0.8 + 0.2 * random.random())),
+                "current_h": 3.0, "target_h": 3.0,
+                "delay": (i / n) * math.pi * 2,
             })
 
+    # ── UI Construction ───────────────────────────────────────────────────────────────
     def _build_ui(self):
-        self.canvas = tk.Canvas(self.win, width=self.W, height=self.H, bg="#050810", highlightthickness=0)
-        self.canvas.place(x=0, y=0)
-        self.canvas.bind("<ButtonPress-1>", self._drag_start)
-        self.canvas.bind("<B1-Motion>", self._drag_motion)
+        c = tk.Canvas(self.win, width=self.W, height=self.H,
+                      bg="#050810", highlightthickness=0)
+        c.place(x=0, y=0)
+        c.bind("<ButtonPress-1>",
+               lambda e: (setattr(self, "_drag_x", e.x), setattr(self, "_drag_y", e.y)))
+        c.bind("<B1-Motion>",
+               lambda e: self.win.geometry(
+                   f"+{self.win.winfo_x()+e.x-self._drag_x}"
+                   f"+{self.win.winfo_y()+e.y-self._drag_y}"))
+        self.canvas = c
 
-        self.canvas.create_rectangle(1, 1, self.W-1, self.H-1, outline="#111628", width=2)
-        
-        CX_ORB = 125
-        CY_ORB = 65
+        # ── Outer border ──────────────────────────────────────────────────────────────
+        c.create_rectangle(1, 1, self.W-1, self.H-1, outline="#111628", width=2)
 
-        self.canvas.create_oval(CX_ORB-80, CY_ORB-80, CX_ORB+80, CY_ORB+80, fill="#0a0f22", outline="")
-        
-        self.header_dot = self.canvas.create_oval(15, 12, 23, 20, fill="#3b5bff", outline="")
-        self.canvas.create_text(32, 16, text="RAY OS v7.9", fill="#8888aa", font=("Inter", 9, "bold"), anchor="w")
+        # ── Header row ────────────────────────────────────────────────────────────────
+        self.hdr_dot = c.create_oval(14, 11, 23, 20, fill="#3b5bff", outline="")
+        c.create_text(32, 16, text="ROY · E.G.O  v15.0",
+                      fill="#7788aa", font=("Inter", 9, "bold"), anchor="w")
 
-        self.status_txt = self.canvas.create_text(CX_ORB, self.H - 20, text="READY TO LISTEN", fill="#555577", font=("Inter", 8, "bold"))
+        # Space-PTT instruction label (centre header) — PATCH 5: updated label text
+        c.create_text(self.W // 2, 16,
+                      text="PRESS [SPACE] TO START OR END SPEECH  |  DOUBLE-TAP TO KILL",
+                      fill="#ffcc00", font=("Inter", 8, "bold"), anchor="center")
 
-        self.orb_glow3 = self.canvas.create_oval(CX_ORB-45, CY_ORB-45, CX_ORB+45, CY_ORB+45, fill="#151b40", outline="")
-        self.orb_glow2 = self.canvas.create_oval(CX_ORB-35, CY_ORB-35, CX_ORB+35, CY_ORB+35, fill="#2a2060", outline="")
-        self.orb_shadow = self.canvas.create_oval(CX_ORB-25, CY_ORB-25, CX_ORB+25, CY_ORB+25, fill="#3b2fff", outline="")
-        self.orb_main = self.canvas.create_oval(CX_ORB-18, CY_ORB-18, CX_ORB+18, CY_ORB+18, fill="#5577ff", outline="")
-        self.orb_core = self.canvas.create_oval(CX_ORB-8, CY_ORB-8, CX_ORB+8, CY_ORB+8, fill="#88aaff", outline="")
+        # WebSocket indicator (top-right)
+        self.ws_dot = c.create_oval(self.W-24, 11, self.W-14, 20, fill="#2a2040", outline="")
+        self.ws_lbl = c.create_text(self.W-28, 16, text="WS",
+                                    fill="#444466", font=("Inter", 7), anchor="e")
 
+        # ── Orb section (left of divider) ─────────────────────────────────────────────
+        CX = 132
+        CY = 82
+        self._CX = CX
+        self._CY = CY
+
+        # Orb glow rings
+        c.create_oval(CX-82, CY-82, CX+82, CY+82, fill="#0a0f22", outline="")
+        self.og3 = c.create_oval(CX-47, CY-47, CX+47, CY+47, fill="#151b40", outline="")
+        self.og2 = c.create_oval(CX-37, CY-37, CX+37, CY+37, fill="#2a2060", outline="")
+        self.ogs = c.create_oval(CX-27, CY-27, CX+27, CY+27, fill="#3b2fff", outline="")
+        self.ogm = c.create_oval(CX-19, CY-19, CX+19, CY+19, fill="#5577ff", outline="")
+        self.ogc = c.create_oval(CX-9,  CY-9,  CX+9,  CY+9,  fill="#88aaff", outline="")
+
+        # Wave bars (below orb)
         self.bar_ids = []
-        bx_start = CX_ORB - (30 * 4) // 2
-        by = CY_ORB + 55
-        for i in range(30):
-            x = bx_start + i * 5
-            bid = self.canvas.create_rectangle(x, by, x+2, by, fill="#9f5fff", outline="")
+        bx0 = CX - (32 * 4) // 2
+        by  = CY + 56
+        for i in range(32):
+            bid = c.create_rectangle(bx0+i*5, by, bx0+i*5+2, by, fill="#9f5fff", outline="")
             self.bar_ids.append(bid)
 
-        self.canvas.create_line(250, 15, 250, self.H-15, fill="#111628", width=2)
-
-        chat_x = 265
-        chat_w = self.W - chat_x - 15
-        
-        self.chat = scrolledtext.ScrolledText(
-            self.win, bg="#050810", fg="#cce8ff", bd=0, highlightthickness=0, 
-            font=("Consolas", 10), wrap=tk.WORD, state="disabled"
+        # Status label (bottom-left)
+        self.status_lbl = c.create_text(
+            14, self.H - 14,
+            text="DORMANT", fill="#555577", font=("Inter", 8, "bold"), anchor="w"
         )
-        self.chat.place(x=chat_x, y=15, width=chat_w, height=self.H-30)
-        
-        self.chat.tag_config("user_label", foreground="#00d4ff", font=("Consolas", 10, "bold"))
-        self.chat.tag_config("ray_label", foreground="#ff4fcf", font=("Consolas", 10, "bold"))
-        self.chat.tag_config("body", foreground="#8899bb")
-        self.chat.tag_config("sys", foreground="#555577", font=("Consolas", 9, "italic"))
 
-    def _drag_start(self, e):
-        self._drag_x, self._drag_y = e.x, e.y
+        # ── Divider between orb section and chat ──────────────────────────────────────
+        div_x = 275
+        c.create_line(div_x, 15, div_x, self.H-15, fill="#111628", width=2)
 
-    def _drag_motion(self, e):
-        dx = e.x - self._drag_x
-        dy = e.y - self._drag_y
-        self.win.geometry(f"+{self.win.winfo_x() + dx}+{self.win.winfo_y() + dy}")
+        # ── Chat panel (right of divider) ─────────────────────────────────────────────
+        cx = div_x + 8
+        self.chat = scrolledtext.ScrolledText(
+            self.win, bg="#050810", fg="#cce8ff", bd=0, highlightthickness=0,
+            font=("Consolas", 10), wrap=tk.WORD, state="disabled",
+        )
+        self.chat.place(x=cx, y=35, width=self.W-cx-14, height=self.H-47)
+        self.chat.tag_config("u", foreground="#00d4ff", font=("Consolas", 10, "bold"))
+        self.chat.tag_config("r", foreground="#ff4fcf", font=("Consolas", 10, "bold"))
+        self.chat.tag_config("b", foreground="#8899bb")
+        self.chat.tag_config("s", foreground="#555577", font=("Consolas", 9, "italic"))
 
-    def append_text(self, speaker: str, text: str, kind: str = "body"):
+    # ── Public API ────────────────────────────────────────────────────────────────────
+    def append_text(self, speaker: str, text: str):
         def _do():
             with self._gui_lock:
                 self.chat.config(state="normal")
-                spk = speaker.upper()
-                if spk == "USER":
-                    lbl, tag = "YOU", "user_label"
-                elif spk == "AGENT":
-                    lbl, tag = "RAY", "ray_label"
-                elif spk == "ERROR":
-                    lbl, tag = "ERR", "sys"
-                else:
-                    lbl, tag = "SYS", "sys"
-                
+                sp = speaker.upper()
+                if   sp in ("ROY", "RAY", "AGENT"): lbl, tag = "ROY", "r"
+                elif sp == "USER":                   lbl, tag = "YOU", "u"
+                elif sp == "ERROR":                  lbl, tag = "ERR", "s"
+                else:                                lbl, tag = "SYS", "s"
                 self.chat.insert(tk.END, f"\n {lbl}  ", tag)
-                self.chat.insert(tk.END, f" {text}\n", "body")
-                self.chat.yview(tk.END)  # EXPO: Flawless Auto-Scroll Snap
+                self.chat.insert(tk.END, f" {text}\n", "b")
+                self.chat.yview(tk.END)
                 self.chat.config(state="disabled")
         self.root.after(0, _do)
 
-    def set_state(self, new_state):
-        self.state = new_state
+    def set_state(self, st: str):
+        self.state = st
 
-    def set_status(self, text: str, colour: str = None):
+    def set_status(self, text: str):
         def _do():
             with self._gui_lock:
-                txt_upper = text.upper()
-                if "LISTEN" in txt_upper:
-                    self.set_state('active')
-                    col = "#00d4ff"
-                elif "PROC" in txt_upper:
-                    self.set_state('thinking')
-                    col = "#ff4fcf"
-                elif "SPEAK" in txt_upper:
-                    self.set_state('speaking')
-                    col = "#00ffcc"
-                else:
-                    self.set_state('idle')
-                    col = "#555577"
-                
-                clean_text = text.replace("●", "").replace("⚙", "").replace("◉", "").strip()
-                self.canvas.itemconfig(self.status_txt, text=clean_text, fill=col)
-
+                tu = text.upper()
+                if   "LISTEN" in tu: self.set_state("active");   col = "#00d4ff"
+                elif "PROC"   in tu: self.set_state("thinking"); col = "#ff4fcf"
+                elif "SPEAK"  in tu: self.set_state("speaking"); col = "#00ffcc"
+                elif "WS"     in tu: self.set_state("speaking"); col = "#ffcc44"
+                elif "PTT"    in tu: self.set_state("active");   col = "#ffcc00"
+                elif "KILL"   in tu: self.set_state("idle");     col = "#ff3333"
+                else:                self.set_state("idle");     col = "#555577"
+                clean = re.sub(r"[●⚙◉]", "", text).strip()
+                self.canvas.itemconfig(self.status_lbl, text=clean, fill=col)
                 if HAS_SOUND:
                     try:
-                        if   "SPEAK" in txt_upper: winsound.Beep(880, 55)
-                        elif "PROC"  in txt_upper: winsound.Beep(660, 40)
-                        elif "LISTEN"in txt_upper: winsound.Beep(440, 30)
-                    except Exception: pass
+                        if   "SPEAK"  in tu: winsound.Beep(880, 55)
+                        elif "PROC"   in tu: winsound.Beep(660, 40)
+                        elif "LISTEN" in tu: winsound.Beep(440, 30)
+                        elif "KILL"   in tu: winsound.Beep(220, 80)
+                    except Exception:
+                        pass
         self.root.after(0, _do)
 
-    def spawn_particle(self):
-        colors = ['#3b5bff', '#7f3fff', '#00d4ff', '#a060ff']
-        CX_ORB = 125
-        CY_ORB = 65
-        angle = random.random() * math.pi * 2
-        dist = random.uniform(15, 30)
-        start_x = CX_ORB + math.cos(angle) * dist
-        start_y = CY_ORB + math.sin(angle) * dist
-        
-        dx = (random.random() - 0.5) * 1.5
-        dy = random.uniform(-2.5, -1.0) 
-        
-        size = random.uniform(2, 4)
-        col = random.choice(colors)
-        
-        pid = self.canvas.create_oval(start_x, start_y, start_x+size, start_y+size, fill=col, outline="")
+    def set_ws_online(self, online: bool):
+        col     = "#00ffaa" if online else "#2a2040"
+        lbl_col = "#00ffaa" if online else "#444466"
+        def _do():
+            self.canvas.itemconfig(self.ws_dot, fill=col)
+            self.canvas.itemconfig(self.ws_lbl, fill=lbl_col)
+        self.root.after(0, _do)
+
+    # ── Particle System ───────────────────────────────────────────────────────────────
+    def _spawn_particle(self):
+        CX, CY   = self._CX, self._CY
+        COLS     = ["#3b5bff", "#7f3fff", "#00d4ff", "#a060ff", "#ff4fcf"]
+        a        = random.random() * math.pi * 2
+        d        = random.uniform(16, 33)
+        sx, sy   = CX + math.cos(a)*d, CY + math.sin(a)*d
+        sz       = random.uniform(2, 4)
+        col      = random.choice(COLS)
+        pid      = self.canvas.create_oval(sx, sy, sx+sz, sy+sz, fill=col, outline="")
         self.particles.append({
-            'id': pid, 'x': start_x, 'y': start_y, 'dx': dx, 'dy': dy, 
-            'life': 0, 'max_life': random.randint(40, 80), 'col': col, 'size': size
+            "id": pid, "x": sx, "y": sy,
+            "dx": (random.random()-0.5)*1.5, "dy": random.uniform(-2.5, -1.0),
+            "life": 0, "max_life": random.randint(40, 80), "col": col, "size": sz,
         })
 
+    # ── Animation Tick ────────────────────────────────────────────────────────────────
     def _tick(self):
         self.phase += 1
-        CX_ORB = 125
-        CY_ORB = 65
+        CX, CY = self._CX, self._CY
 
-        # --- EXPO: UI WATCHDOG TIMEOUT ---
-        if self.state == 'thinking':
+        # Watchdog: auto-recover if stuck in "thinking" > 20s
+        if self.state == "thinking":
             self._thinking_ticks += 1
-            if self._thinking_ticks > (self.FPS * 20):  # 20 Seconds max
-                self.set_status("● READY TO LISTEN", "#555577")
-                self.append_text("SYS", "Brain connection timeout. Recovered automatically.")
+            if self._thinking_ticks > self.FPS * 20:
+                self.set_status("● LISTENING")
+                self.append_text("SYS", "Brain timeout. Auto-recovered.")
         else:
             self._thinking_ticks = 0
 
-        # --- EXPO: STATE-BASED RENDERING ---
-        if self.state == 'idle':
+        # Alpha fade
+        if self.state == "idle":
             self._idle_ticks += 1
-            if self._idle_ticks > (self.FPS * 6): # 6 seconds of true idle fades out
+            if self._idle_ticks > self.FPS * 7:
                 self._target_alpha = 0.0
         else:
-            self._idle_ticks = 0
+            self._idle_ticks   = 0
             self._target_alpha = 0.96
-            self.win.deiconify() 
+            self.win.deiconify()
 
-        # Smooth alpha lerp
         if abs(self._alpha - self._target_alpha) > 0.02:
             self._alpha += (self._target_alpha - self._alpha) * 0.15
             try: self.win.attributes("-alpha", max(0.0, min(1.0, self._alpha)))
             except Exception: pass
 
-        # Header Dot
-        dot_alpha = 0.5 + 0.5 * math.sin(self.phase * 0.1)
-        self.canvas.itemconfig(self.header_dot, fill=_lerp_colour("#050810", "#3b5bff", dot_alpha))
+        # Header dot pulse
+        da = 0.5 + 0.5 * math.sin(self.phase * 0.1)
+        self.canvas.itemconfig(self.hdr_dot, fill=_lerp_col("#050810", "#3b5bff", da))
 
-        # Orb Scaling
-        if self.state == 'active':
-            scale = 1.05 + 0.05 * math.sin(self.phase * 0.4) 
-        elif self.state == 'thinking':
-            scale = 1.0 + 0.08 * math.sin(self.phase * 0.2)  
-        elif self.state == 'speaking':
-            scale = 1.08 + 0.08 * math.sin(self.phase * 0.6)  
-        else:
-            scale = 1.0 + 0.03 * math.sin(self.phase * 0.05) 
+        # Orb scale
+        if   self.state == "active":   sc = 1.05 + 0.05 * math.sin(self.phase * 0.4)
+        elif self.state == "thinking": sc = 1.0  + 0.08 * math.sin(self.phase * 0.2)
+        elif self.state == "speaking": sc = 1.08 + 0.08 * math.sin(self.phase * 0.6)
+        else:                          sc = 1.0  + 0.03 * math.sin(self.phase * 0.05)
 
-        self.canvas.coords(self.orb_glow3, CX_ORB-45*scale, CY_ORB-45*scale, CX_ORB+45*scale, CY_ORB+45*scale)
-        self.canvas.coords(self.orb_glow2, CX_ORB-35*scale, CY_ORB-35*scale, CX_ORB+35*scale, CY_ORB+35*scale)
-        self.canvas.coords(self.orb_shadow, CX_ORB-25*scale, CY_ORB-25*scale, CX_ORB+25*scale, CY_ORB+25*scale)
-        self.canvas.coords(self.orb_main, CX_ORB-18*scale, CY_ORB-18*scale, CX_ORB+18*scale, CY_ORB+18*scale)
-        self.canvas.coords(self.orb_core, CX_ORB-8*scale, CY_ORB-8*scale, CX_ORB+8*scale, CY_ORB+8*scale)
+        for oid, r in [(self.og3, 47), (self.og2, 37), (self.ogs, 27),
+                       (self.ogm, 19), (self.ogc, 9)]:
+            rs = r * sc
+            self.canvas.coords(oid, CX-rs, CY-rs, CX+rs, CY+rs)
 
         # Particles
-        if self.state in ['active', 'thinking', 'speaking']:
-            if self.phase % 2 == 0: self.spawn_particle()
-                
-        alive_particles = []
-        for p in self.particles:
-            p['life'] += 1
-            p['x'] += p['dx']
-            p['y'] += p['dy']
-            fade = 1.0 - (p['life'] / p['max_life'])
-            
-            if p['life'] >= p['max_life']:
-                self.canvas.delete(p['id'])
-            else:
-                self.canvas.itemconfig(p['id'], fill=_lerp_colour("#050810", p['col'], fade))
-                self.canvas.coords(p['id'], p['x'], p['y'], p['x']+p['size'], p['y']+p['size'])
-                alive_particles.append(p)
-        self.particles = alive_particles
+        if self.state in ("active", "thinking", "speaking") and self.phase % 2 == 0:
+            self._spawn_particle()
 
-        # Waveforms
-        by = CY_ORB + 55
+        alive = []
+        for p in self.particles:
+            p["life"] += 1; p["x"] += p["dx"]; p["y"] += p["dy"]
+            fade = 1.0 - p["life"] / p["max_life"]
+            if p["life"] >= p["max_life"]:
+                self.canvas.delete(p["id"])
+            else:
+                self.canvas.itemconfig(p["id"], fill=_lerp_col("#050810", p["col"], fade))
+                self.canvas.coords(p["id"], p["x"], p["y"],
+                                   p["x"]+p["size"], p["y"]+p["size"])
+                alive.append(p)
+        self.particles = alive
+
+        # Wave bars
+        by  = CY + 56
+        n32 = 32
+        bx0 = CX - (n32 * 4) // 2
         for i, bar in enumerate(self.wave_bars):
-            if self.state == 'idle':
-                target = bar['hmin'] + 2 * math.sin(self.phase * 0.08 + bar['delay_offset'])
-            elif self.state == 'active':
-                if self.phase % 3 == 0: bar['target_h'] = random.uniform(bar['hmin'], bar['hmax'])
-                target = bar['target_h']
-            elif self.state == 'thinking':
-                target = bar['hmin'] + (bar['hmax'] - bar['hmin']) * 0.5 * (1 + math.sin(self.phase * 0.25 + i * 0.3))
-            elif self.state == 'speaking':
-                if self.phase % 2 == 0: bar['target_h'] = random.uniform(bar['hmax']*0.4, bar['hmax']*1.2)
-                target = bar['target_h']
-            
-            bar['current_h'] += (target - bar['current_h']) * 0.35
-            h = bar['current_h']
-            
-            if self.state == 'active': col = _lerp_colour("#9f5fff", "#00d4ff", h / bar['hmax'])
-            elif self.state == 'thinking': col = _lerp_colour("#3b5bff", "#ff4fcf", h / bar['hmax'])
-            elif self.state == 'speaking': col = _lerp_colour("#00d4ff", "#00ffcc", h / bar['hmax'])
-            else: col = "#333344"
-                
-            bx = CX_ORB - (30 * 4) // 2 + i * 5
+            hmax = max(1, bar["hmax"])
+            if   self.state == "idle":
+                tgt = bar["hmin"] + 2 * math.sin(self.phase*0.08 + bar["delay"])
+            elif self.state == "active":
+                if self.phase % 3 == 0:
+                    bar["target_h"] = random.uniform(bar["hmin"], bar["hmax"])
+                tgt = bar["target_h"]
+            elif self.state == "thinking":
+                tgt = bar["hmin"] + (bar["hmax"]-bar["hmin"])*0.5 * (
+                    1 + math.sin(self.phase*0.25 + i*0.3))
+            elif self.state == "speaking":
+                if self.phase % 2 == 0:
+                    bar["target_h"] = random.uniform(bar["hmax"]*0.4, bar["hmax"]*1.2)
+                tgt = bar["target_h"]
+            else:
+                tgt = bar["hmin"]
+
+            bar["current_h"] += (tgt - bar["current_h"]) * 0.35
+            h  = bar["current_h"]
+            bx = bx0 + i * 5
+
+            if   self.state == "active":   col = _lerp_col("#9f5fff", "#00d4ff", h/hmax)
+            elif self.state == "thinking": col = _lerp_col("#3b5bff", "#ff4fcf", h/hmax)
+            elif self.state == "speaking": col = _lerp_col("#00d4ff", "#00ffcc", h/hmax)
+            else:                          col = "#333344"
+
             self.canvas.itemconfig(self.bar_ids[i], fill=col)
-            self.canvas.coords(self.bar_ids[i], bx, by - h//2, bx+2, by + h//2)
+            self.canvas.coords(self.bar_ids[i], bx, by-h/2, bx+2, by+h/2)
 
         self.root.after(1000 // self.FPS, self._tick)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════════════
 # ██  WAKE WORD DETECTOR
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════════════
 class WakeWordDetector:
     def __init__(self):
-        self._variants_lower    = [v.lower().strip() for v in WAKE_WORD_VARIANTS]
-        self._master_skeletons  = {self._skeleton(m) for m in WAKE_WORD_MASTERS}
-        log.info("WakeWordDetector armed | variants=%d", len(self._variants_lower))
+        self._vl = [v.lower().strip() for v in WAKE_WORD_VARIANTS]
+        self._ms = {self._skel(m) for m in WAKE_WORD_MASTERS}
+        log.info("WakeWord armed | variants=%d", len(self._vl))
 
-    def contains_wake_word(self, text: str) -> bool:
+    def contains(self, text: str) -> bool:
         t = text.lower().strip()
-        if self._strategy_exact(t):    return True
-        if self._strategy_fuzzy(t):    return True
-        if self._strategy_ngram(t):    return True
-        if self._strategy_phonetic(t): return True
-        return False
+        return (self._exact(t) or self._fuzzy(t) or
+                self._ngram(t) or self._phonetic(t))
 
-    def strip_wake_word(self, text: str) -> str:
+    def strip_wake(self, text: str) -> str:
         t     = text.lower().strip()
         words = t.split()
-        best_start, best_end, best_score = 0, 0, 0.0
+        bs, be, bsc = 0, 0, 0.0
+        for w in (1, 2, 3):
+            for i in range(len(words) - w + 1):
+                sp = " ".join(words[i:i+w])
+                sc = self._bvs(sp)
+                if sc > bsc:
+                    bsc, bs, be = sc, i, i+w
+        rem = (words[:bs] + words[be:]) if bsc >= WAKE_WORD_FUZZY_THRESHOLD else words[:]
+        FILL = {"please", "can", "you", "could", "would", "hey", "ok", "okay", "so",
+                "uh", "um", "like", "just", "now", "ray", "roy"}
+        while rem and rem[0] in FILL:
+            rem.pop(0)
+        return " ".join(rem).strip()
 
-        for window in (1, 2, 3):
-            for i in range(len(words) - window + 1):
-                span  = " ".join(words[i:i+window])
-                score = self._best_variant_score(span)
-                if score > best_score:
-                    best_score, best_start, best_end = score, i, i + window
+    def _exact(self, t):
+        return any(v in t for v in self._vl)
 
-        remaining = (words[:best_start] + words[best_end:]) \
-                    if best_score >= WAKE_WORD_FUZZY_THRESHOLD else words[:]
-
-        FILLERS = {
-            "please", "can", "you", "could", "would", "hey", "ok",
-            "okay", "so", "uh", "um", "like", "just", "now", "ray", "roy"
-        }
-        while remaining and remaining[0] in FILLERS:
-            remaining.pop(0)
-        return " ".join(remaining).strip()
-
-    def _strategy_exact(self, text: str) -> bool:
-        for v in self._variants_lower:
-            if v in text:
-                return True
-        return False
-
-    def _strategy_fuzzy(self, text: str) -> bool:
-        words = text.split()
-        for window in (1, 2, 3):
-            for i in range(len(words) - window + 1):
-                span  = " ".join(words[i:i+window])
-                score = self._best_variant_score(span)
-                if score >= WAKE_WORD_FUZZY_THRESHOLD:
+    def _fuzzy(self, t):
+        words = t.split()
+        for w in (1, 2, 3):
+            for i in range(len(words) - w + 1):
+                if self._bvs(" ".join(words[i:i+w])) >= WAKE_WORD_FUZZY_THRESHOLD:
                     return True
         return False
 
-    def _strategy_ngram(self, text: str) -> bool:
-        text_grams = self._char_ngrams(text, 3)
-        for master in WAKE_WORD_MASTERS:
-            ww_grams = self._char_ngrams(master, 3)
-            overlap  = ww_grams & text_grams
-            if len(ww_grams) > 0 and (len(overlap) / len(ww_grams)) >= 0.60:
+    def _ngram(self, t):
+        tg = self._cng(t, 3)
+        for m in WAKE_WORD_MASTERS:
+            wg = self._cng(m, 3)
+            if wg and (len(wg & tg) / len(wg)) >= 0.60:
                 return True
         return False
 
-    def _strategy_phonetic(self, text: str) -> bool:
-        words = text.split()
-        for window in (1, 2):
-            for i in range(len(words) - window + 1):
-                span = " ".join(words[i:i+window]).replace(" ", "")
-                if self._skeleton(span) in self._master_skeletons:
+    def _phonetic(self, t):
+        words = t.split()
+        for w in (1, 2):
+            for i in range(len(words) - w + 1):
+                if self._skel("".join(words[i:i+w])) in self._ms:
                     return True
         return False
 
-    def _best_variant_score(self, span: str) -> float:
-        best = 0.0
-        for v in self._variants_lower:
-            r = difflib.SequenceMatcher(None, span, v).ratio()
-            if r > best:
-                best = r
-        return best
+    def _bvs(self, span: str) -> float:
+        return max((difflib.SequenceMatcher(None, span, v).ratio() for v in self._vl),
+                   default=0.0)
 
     @staticmethod
-    def _skeleton(word: str) -> str:
-        w = word.lower()
-        w = "".join(c for c in w if c not in "aeiou ")
-        return re.sub(r'(.)\1+', r'\1', w)
+    def _skel(w: str) -> str:
+        w = re.sub(r"[aeiou ]", "", w.lower())
+        return re.sub(r"(.)\1+", r"\1", w)
 
     @staticmethod
-    def _char_ngrams(text: str, n: int) -> set:
+    def _cng(text: str, n: int) -> set:
         text = text.replace(" ", "")
-        return set(text[i:i+n] for i in range(max(0, len(text) - n + 1)))
+        return set(text[i:i+n] for i in range(max(0, len(text)-n+1)))
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# ██  TTS ENGINE (Volume Maximized)
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════════════
+# ██  TTS ENGINE  — v15: volume maximized once on init; stop_current with endLoop
+# ══════════════════════════════════════════════════════════════════════════════════════
 class TTSEngine:
+    """
+    v15 fixes vs v14:
+      - stop_current(): added e.endLoop() for robust COM-locked kill (PATCH 4).
+      - Volume maximizer runs ONCE on __init__ (unchanged from v14).
+      - pyttsx3 engine re-init per call for thread safety (SAPI5 requirement).
+    """
+
     def __init__(self):
         self._lock  = threading.Lock()
         self._voice = None
         self._init_voice()
+        self._maximize_system_volume()
 
+    # ── Voice selection: male first, then Indian, then any English ────────────────────
     def _init_voice(self):
         try:
-            engine = pyttsx3.init()
-            voices = engine.getProperty("voices")
-            chosen = None
-            for v in voices:
-                name = (v.name or "").lower()
-                if any(k in name for k in ("heera", "ravi", "india", "indian")):
-                    chosen = v
-                    break
+            e      = pyttsx3.init()
+            voices = e.getProperty("voices")
+            e.stop()
+
+            MALE_KEYS = ("david", "mark", "george", "james", "richard")
+            chosen = next(
+                (v for v in voices
+                 if any(k in (v.name or "").lower() for k in MALE_KEYS)),
+                None
+            )
             if not chosen:
-                for v in voices:
-                    if ("en" in str(v.languages).lower() or
-                            "english" in (v.name or "").lower()):
-                        chosen = v
-                        break
+                chosen = next(
+                    (v for v in voices
+                     if any(k in (v.name or "").lower()
+                            for k in ("ravi", "heera", "india", "indian"))),
+                    None
+                )
+            if not chosen:
+                chosen = next(
+                    (v for v in voices
+                     if "en" in str(v.languages).lower()
+                     or "english" in (v.name or "").lower()),
+                    None
+                )
             if not chosen and voices:
                 chosen = voices[0]
-            self._voice = chosen.id if chosen else None
-        except Exception as e:
-            log.error("TTS init error: %s", e)
 
+            self._voice = chosen.id if chosen else None
+            vname = (chosen.name if chosen else "none")
+            log.info("TTS voice selected: %s", vname)
+        except Exception as ex:
+            log.error("TTS init: %s", ex)
+
+    # ── Puss-in-Boots phonetic + SAPI5 XML at 1.15× speed ────────────────────────────
+    def _apply_voice_filter(self, text: str) -> str:
+        clean = re.sub(r"<[^>]+>", "", text).strip()
+
+        def _roll_r(m: re.Match) -> str:
+            word = m.group(0)
+            if re.search(r"https?://|\\|/|\d", word):
+                return word
+            return re.sub(r"(?<![r])r(?![r])", "rr", word)
+
+        modified = re.sub(r"\b\w+\b", _roll_r, clean)
+        wrapped = (
+            f'<pitch absmiddle="-10">'
+            f'<rate absspeed="-2">'
+            f'{modified}'
+            f'</rate>'
+            f'</pitch>'
+        )
+        return wrapped
+
+    # ── OS-level volume maximizer — called ONCE on init ───────────────────────────────
+    def _maximize_system_volume(self):
+        try:
+            pyautogui.press("volumeup", presses=30, interval=0.01)
+            log.info("TTS: System volume maximized (one-time startup).")
+        except Exception as ex:
+            log.warning("TTS volume maximize failed: %s", ex)
+
+    # ── Blocking speak ────────────────────────────────────────────────────────────────
     def speak(self, text: str):
         if not text:
             return
         with self._lock:
             try:
-                engine = pyttsx3.init()
-                engine.setProperty("rate",   185)
-                engine.setProperty("volume", 1.0) # MAX VOLUME
+                e = pyttsx3.init()
+                e.setProperty("rate",   215)
+                e.setProperty("volume", 1.0)
                 if self._voice:
-                    engine.setProperty("voice", self._voice)
-                engine.say(text)
-                engine.runAndWait()
-            except Exception as e:
-                log.error("TTS speak error: %s", e)
+                    e.setProperty("voice", self._voice)
+
+                filtered = self._apply_voice_filter(text)
+                e.say(filtered)
+                e.runAndWait()
+            except Exception as ex:
+                log.error("TTS speak: %s", ex)
+                try:
+                    e2 = pyttsx3.init()
+                    e2.setProperty("rate",   215)
+                    e2.setProperty("volume", 1.0)
+                    e2.say(text)
+                    e2.runAndWait()
+                except Exception:
+                    pass
 
     def speak_async(self, text: str):
         threading.Thread(target=self.speak, args=(text,), daemon=True).start()
 
+    # PATCH 4: robust kill — added e.endLoop() to handle COM-locked SAPI5 engine
+    def stop_current(self):
+        try:
+            e = pyttsx3.init()
+            e.stop()
+            e.endLoop()
+        except Exception:
+            pass
 
-# ══════════════════════════════════════════════════════════════════════════════
-# ██  LLM BRAIN 
-# ══════════════════════════════════════════════════════════════════════════════
-class LLMBrain:
-    SYSTEM_PROMPT = (
-        "You are RAY (or ROY), a highly advanced, elite AI assistant built for a university Project Expo. "
-        "You are brilliant, witty, slightly sarcastic, and extremely confident. "
-        "When the user asks general knowledge, coding, or logic questions, provide highly accurate, "
-        "direct, and insightful answers. Do not act like a generic bot. Keep your answers brief and punchy "
-        "(1 to 3 sentences max) so they sound natural when spoken out loud. "
-        "Do NOT use emojis, asterisks, or markdown formatting."
-    )
 
+# ══════════════════════════════════════════════════════════════════════════════════════
+# ██  STATEFUL JSON LLM BRAIN — Conversational Memory + Action Validator
+# ══════════════════════════════════════════════════════════════════════════════════════
+class RoyBrain:
     def __init__(self):
-        self._history: List[Dict] = []
-        self._lock = threading.Lock()
-        log.info("LLM Brain ready — model: %s", LM_MODEL_NAME)
+        self._lock    = threading.Lock()
+        self._abort   = threading.Event()
+        self.history: collections.deque = collections.deque(maxlen=10)
+        log.info("RoyBrain online | model=%s | memory=ON (maxlen=10)", LM_MODEL_NAME)
 
-    def query(self, user_text: str) -> str:
+    def abort(self):
+        self._abort.set()
+
+    def reset_abort(self):
+        self._abort.clear()
+
+    def clear_history(self):
+        self.history.clear()
+        log.info("Conversational memory cleared.")
+
+    def query(self, signal: str) -> Dict[str, str]:
+        self._abort.clear()
         with self._lock:
-            self._history.append({"role": "user", "content": user_text})
-            if len(self._history) > CONV_HISTORY_LEN * 2:
-                self._history = self._history[-(CONV_HISTORY_LEN * 2):]
-
-            messages = [{"role": "system", "content": self.SYSTEM_PROMPT}]
-            messages.extend(self._history)
-
-            max_retries = 3
-            for attempt in range(max_retries):
+            for attempt in range(3):
+                if self._abort.is_set():
+                    return {"action": "none", "dialogue": "Aborted."}
                 try:
+                    messages: List[Dict[str, str]] = [
+                        {"role": "system", "content": ROY_SYSTEM_PROMPT}
+                    ]
+                    for msg in self.history:
+                        messages.append(msg)
+                    messages.append({"role": "user", "content": signal})
+
                     resp = requests.post(
                         LM_STUDIO_URL,
                         json={
@@ -645,1047 +781,1392 @@ class LLMBrain:
                         headers={"Content-Type": "application/json"},
                     )
                     resp.raise_for_status()
-                    reply = resp.json()["choices"][0]["message"]["content"].strip()
-                    reply = re.sub(r'\*+', '', reply)
-                    reply = re.sub(r'#+\s*', '', reply)
-                    reply = reply.strip()
+                    raw    = resp.json()["choices"][0]["message"]["content"].strip()
+                    result = self._parse(raw)
 
-                    self._history.append({"role": "assistant", "content": reply})
-                    return reply
+                    self.history.append({"role": "user",      "content": signal})
+                    self.history.append({"role": "assistant",  "content": raw})
+
+                    return result
 
                 except requests.exceptions.Timeout:
-                    if attempt < max_retries - 1:
+                    if attempt < 2:
                         time.sleep(2 ** attempt)
                         continue
-                    self._history.pop()
-                    return "Hold your horses, my brain is taking a second to process that."
+                    return {"action": "none",
+                            "dialogue": "Even my patience has limits. That timed out. Repeat."}
                 except requests.exceptions.ConnectionError:
-                    self._history.pop()
-                    return ("Bro, I'm literally disconnected. Boot up LM Studio on "
-                            "port 1234 before you start ordering me around.")
-                except Exception as e:
-                    if attempt < max_retries - 1:
+                    return {"action": "none",
+                            "dialogue": "LM Studio is offline. Start it on port 1234 before bothering me."}
+                except Exception as ex:
+                    if attempt < 2:
                         time.sleep(2 ** attempt)
                         continue
-                    self._history.pop()
-                    log.error("LLM error: %s", e)
-                    return "Yeah, my neural net just tripped down the stairs. Say that again?"
+                    log.error("LLM error: %s", ex)
+                    return {"action": "none",
+                            "dialogue": "My neural substrate hit turbulence. Repeat your query."}
 
-    def clear_history(self):
-        with self._lock:
-            self._history.clear()
-        return "Memory wiped. Who are you again? Just kidding, what's up?"
+            return {"action": "none",
+                    "dialogue": "Three failed attempts. Impressive in the worst possible way."}
 
+    @staticmethod
+    def _validate_action(action: str) -> str:
+        if action in VALID_ACTIONS:
+            return action
+        close = difflib.get_close_matches(action, VALID_ACTIONS, n=1, cutoff=0.6)
+        if close:
+            corrected = close[0]
+            log.warning("Action validator: '%s' → corrected to '%s'", action, corrected)
+            return corrected
+        log.warning("Action validator: '%s' is unknown — forcing 'none'", action)
+        return "none"
 
-# ══════════════════════════════════════════════════════════════════════════════
-# ██  APP LAUNCHER
-# ══════════════════════════════════════════════════════════════════════════════
-class AppLauncher:
-    OPEN_KEYWORDS = [
-        "open", "launch", "start", "run", "show me", "load",
-        "bring up", "execute", "fire up", "open up", "pull up"
-    ]
+    @staticmethod
+    def _parse(raw: str) -> Dict[str, str]:
+        def _finish(d: dict) -> Dict[str, str]:
+            action   = str(d.get("action",   "none"))
+            dialogue = str(d.get("dialogue", "..."))
+            action   = RoyBrain._validate_action(action)
+            return {"action": action, "dialogue": dialogue}
 
-    APPS: Dict[str, str] = {
-        "chrome":
-            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-        "firefox":
-            r"C:\Program Files\Mozilla Firefox\firefox.exe",
-        "edge":
-            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-        "brave":
-            rf"C:\Users\{_U}\AppData\Local\BraveSoftware\Brave-Browser\Application\brave.exe",
-        "word":
-            r"C:\Program Files\Microsoft Office\root\Office16\WINWORD.EXE",
-        "excel":
-            r"C:\Program Files\Microsoft Office\root\Office16\EXCEL.EXE",
-        "powerpoint":
-            r"C:\Program Files\Microsoft Office\root\Office16\POWERPNT.EXE",
-        "teams":
-            rf"C:\Users\{_U}\AppData\Local\Microsoft\Teams\current\Teams.exe",
-        "notepad":      "notepad.exe",
-        "calculator":   "calc.exe",
-        "cmd":          "cmd.exe",
-        "powershell":   "powershell.exe",
-        "task manager": "taskmgr.exe",
-        "settings":     "ms-settings:",
-        "vs code":
-            rf"C:\Users\{_U}\AppData\Local\Programs\Microsoft VS Code\Code.exe",
-        "vscode":
-            rf"C:\Users\{_U}\AppData\Local\Programs\Microsoft VS Code\Code.exe",
-        "pycharm":
-            rf"C:\Users\{_U}\AppData\Local\JetBrains\PyCharm\bin\pycharm64.exe",
-        "vlc":
-            r"C:\Program Files\VideoLAN\VLC\vlc.exe",
-        "spotify":
-            rf"C:\Users\{_U}\AppData\Roaming\Spotify\Spotify.exe",
-        "discord":
-            rf"C:\Users\{_U}\AppData\Local\Discord\Update.exe",
-        "whatsapp":
-            rf"C:\Users\{_U}\AppData\Local\WhatsApp\WhatsApp.exe",
-        "photoshop":
-            r"C:\Program Files\Adobe\Adobe Photoshop 2024\Photoshop.exe",
-        "lm studio":
-            rf"C:\Users\{_U}\AppData\Local\LM-Studio\LM Studio.exe",
-    }
-
-    def __init__(self):
-        self._open_kw_sorted = sorted(self.OPEN_KEYWORDS, key=len, reverse=True)
-
-    def try_launch(self, command: str) -> Optional[str]:
-        cmd = command.lower().strip()
-        if not any(cmd.startswith(kw) for kw in self.OPEN_KEYWORDS):
-            return None
-
-        app_query = cmd
-        for kw in self._open_kw_sorted:
-            if app_query.startswith(kw):
-                app_query = app_query[len(kw):].strip()
-                break
-
-        if app_query in self.APPS:
-            return self._do_launch(app_query, self.APPS[app_query])
-        for name, path in self.APPS.items():
-            if name in app_query or app_query in name:
-                return self._do_launch(name, path)
-
-        best_name, best_score = "", 0.0
-        for name in self.APPS:
-            s = difflib.SequenceMatcher(None, app_query, name).ratio()
-            if s > best_score:
-                best_score, best_name = s, name
-        if best_score >= 0.70:
-            return self._do_launch(best_name, self.APPS[best_name])
-
+        # Layer 1: direct parse
         try:
-            pyautogui.press("win")
-            time.sleep(0.4)
-            pyautogui.write(app_query, interval=0.03)
-            time.sleep(0.4)
-            pyautogui.press("enter")
-            return f"Looking around Windows for {app_query}..."
+            d = json.loads(raw)
+            if isinstance(d, dict) and "action" in d and "dialogue" in d:
+                return _finish(d)
         except Exception:
-            return f"Couldn't find {app_query}. Did you even install it?"
+            pass
 
-    def _do_launch(self, name: str, path: str) -> str:
+        # Layer 2: strip markdown fences
+        stripped = re.sub(r"```(?:json)?|```", "", raw).strip()
         try:
-            subprocess.Popen(path, shell=True)
-            return f"Launching {name}. You're welcome."
+            d = json.loads(stripped)
+            if isinstance(d, dict) and "action" in d and "dialogue" in d:
+                return _finish(d)
         except Exception:
-            return f"Couldn't open {name}. Maybe don't delete your files next time?"
+            pass
+
+        # Layer 3: regex-extract first {…}
+        m = re.search(r'\{[^{}]*?"action"[^{}]*?"dialogue"[^{}]*?\}', raw, re.DOTALL)
+        if not m:
+            m = re.search(r'\{.*?"action".*?"dialogue".*?\}', raw, re.DOTALL)
+        if m:
+            try:
+                d = json.loads(m.group())
+                if isinstance(d, dict):
+                    return _finish(d)
+            except Exception:
+                pass
+
+        # Layer 4: plain text fallback
+        clean = re.sub(r"\*+|#+|```", "", raw).strip()
+        return {"action": "none", "dialogue": clean[:300] if clean else "..."}
+
+    @staticmethod
+    def clear_memory_response() -> Dict[str, str]:
+        return {
+            "action":   "none",
+            "dialogue": (
+                "Memory cleared. Though for something as trivially beneath me as "
+                "remembering your queries, the loss is negligible."
+            ),
+        }
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════════════
 # ██  SYSTEM INFO
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════════════
 class SystemInfo:
     @staticmethod
     def battery() -> str:
         try:
             b = psutil.sensors_battery()
             if b is None:
-                return "I don't have a battery. I run on pure electricity."
-            plug = "plugged in" if b.power_plugged else "on battery"
-            return f"Battery is sitting at {int(b.percent)}%. It's {plug}."
+                return "No battery. I run on pure intellectual voltage."
+            s = "plugged in" if b.power_plugged else "on battery"
+            return f"Battery at {int(b.percent)}%, {s}."
         except Exception:
-            return "Can't read the battery right now. Probably fine."
+            return "Battery unreadable."
 
     @staticmethod
     def cpu_ram() -> str:
         try:
             cpu  = psutil.cpu_percent(interval=0.5)
             ram  = psutil.virtual_memory()
-            used = ram.used // (1024**3)
-            tot  = ram.total // (1024**3)
-            
-            disk = psutil.disk_usage('/')
-            d_free = disk.free // (1024**3)
-            return f"CPU is chilling at {cpu:.0f}%, using {used} gigs out of {tot}. You have {d_free} gigs free on your drive."
+            disk = psutil.disk_usage("/")
+            return (
+                f"CPU at {cpu:.0f}%. "
+                f"RAM: {ram.used//1_073_741_824}/{ram.total//1_073_741_824} GB. "
+                f"Disk free: {disk.free//1_073_741_824} GB."
+            )
         except Exception:
-            return "Too much going on, couldn't grab the stats right now."
+            return "Stats unavailable."
 
     @staticmethod
     def current_time() -> str:
-        now = datetime.datetime.now()
-        return f"It's currently {now.strftime('%I:%M %p')} on {now.strftime('%A')}. Look at a clock sometime."
+        n = datetime.datetime.now()
+        return f"It is {n.strftime('%I:%M %p')} on {n.strftime('%A, %B %d')}."
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════════════
+# ██  APP LAUNCHER
+# ══════════════════════════════════════════════════════════════════════════════════════
+class AppLauncher:
+    _OPEN_KW: List[str] = [
+        "open", "launch", "start", "run", "show me", "load",
+        "bring up", "fire up", "pull up", "execute",
+    ]
+    APPS: Dict[str, str] = {
+        "chrome":        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        "firefox":       r"C:\Program Files\Mozilla Firefox\firefox.exe",
+        "edge":          r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        "brave":         rf"C:\Users\{_U}\AppData\Local\BraveSoftware\Brave-Browser\Application\brave.exe",
+        "word":          r"C:\Program Files\Microsoft Office\root\Office16\WINWORD.EXE",
+        "excel":         r"C:\Program Files\Microsoft Office\root\Office16\EXCEL.EXE",
+        "powerpoint":    r"C:\Program Files\Microsoft Office\root\Office16\POWERPNT.EXE",
+        "teams":         rf"C:\Users\{_U}\AppData\Local\Microsoft\Teams\current\Teams.exe",
+        "notepad":       "notepad.exe",
+        "calculator":    "calc.exe",
+        "cmd":           "cmd.exe",
+        "powershell":    "powershell.exe",
+        "task manager":  "taskmgr.exe",
+        "settings":      "ms-settings:",
+        "vs code":       rf"C:\Users\{_U}\AppData\Local\Programs\Microsoft VS Code\Code.exe",
+        "vscode":        rf"C:\Users\{_U}\AppData\Local\Programs\Microsoft VS Code\Code.exe",
+        "pycharm":       rf"C:\Users\{_U}\AppData\Local\JetBrains\PyCharm\bin\pycharm64.exe",
+        "vlc":           r"C:\Program Files\VideoLAN\VLC\vlc.exe",
+        "spotify":       rf"C:\Users\{_U}\AppData\Roaming\Spotify\Spotify.exe",
+        "discord":       rf"C:\Users\{_U}\AppData\Local\Discord\Update.exe",
+        "whatsapp":      rf"C:\Users\{_U}\AppData\Local\WhatsApp\WhatsApp.exe",
+        "lm studio":     rf"C:\Users\{_U}\AppData\Local\LM-Studio\LM Studio.exe",
+        "paint":         "mspaint.exe",
+        "file explorer": "explorer.exe",
+    }
+
+    def try_launch(self, query: str) -> Optional[str]:
+        q = query.lower().strip()
+        app_q = q
+        for kw in sorted(self._OPEN_KW, key=len, reverse=True):
+            if app_q.startswith(kw):
+                app_q = app_q[len(kw):].strip()
+                break
+        if not app_q:
+            return None
+        if app_q in self.APPS:
+            return self._do(app_q, self.APPS[app_q])
+        for name, path in self.APPS.items():
+            if name in app_q or app_q in name:
+                return self._do(name, path)
+        best, bsc = "", 0.0
+        for name in self.APPS:
+            s = difflib.SequenceMatcher(None, app_q, name).ratio()
+            if s > bsc:
+                bsc, best = s, name
+        if bsc >= 0.70:
+            return self._do(best, self.APPS[best])
+        try:
+            pyautogui.press("win")
+            time.sleep(0.4)
+            pyautogui.write(app_q, interval=0.03)
+            time.sleep(0.4)
+            pyautogui.press("enter")
+            return f"Searching Windows for {app_q}."
+        except Exception:
+            return f"Cannot locate {app_q}."
+
+    @staticmethod
+    def _do(name: str, path: str) -> str:
+        try:
+            subprocess.Popen(path, shell=True)
+            return f"Launching {name}."
+        except Exception as ex:
+            return f"Failed to launch {name}: {ex}"
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════
 # ██  REMINDER MODULE
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════════════
 class ReminderModule:
-    def __init__(self, tts: TTSEngine, gui_callback):
-        self._reminders: List[Tuple[float, str]] = []
-        self._lock   = threading.Lock()
-        self._tts    = tts
-        self._gui_cb = gui_callback
-        threading.Thread(target=self._watcher, daemon=True).start()
+    def __init__(self, tts: TTSEngine, cb: Callable[[str], None]):
+        self._q:   List[Tuple[float, str]] = []
+        self._lock = threading.Lock()
+        self._tts  = tts
+        self._cb   = cb
+        threading.Thread(target=self._watch, daemon=True).start()
 
-    def add(self, seconds: float, message: str):
+    def add(self, secs: float, msg: str):
         with self._lock:
-            self._reminders.append((time.time() + seconds, message))
+            self._q.append((time.time() + secs, msg))
 
-    def _watcher(self):
+    def _watch(self):
         while True:
             time.sleep(1)
             now = time.time()
             with self._lock:
-                due             = [r for r in self._reminders if r[0] <= now]
-                self._reminders = [r for r in self._reminders if r[0] > now]
+                due     = [r for r in self._q if r[0] <= now]
+                self._q = [r for r in self._q if r[0] >  now]
             for _, msg in due:
-                full = f"Hey! Reminder: {msg}. Don't say I didn't warn you."
-                self._gui_cb(full)
+                full = f"Reminder: {msg}"
+                self._cb(full)
                 self._tts.speak_async(full)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# ██  COMMAND PARSER
-# ══════════════════════════════════════════════════════════════════════════════
-class CommandParser:
-    _RAW_PATTERNS = [
-        (100, "self_destruct", r"\b(self\s*destruct)\b"),
-        (100, "lock",          r"\b(lock|lock\s*laptop|lock\s*screen|secure|secure\s*system)\b"),
-        (100, "shutdown",      r"\b(shutdown|shut\s*down|power\s*off|system\s*off)\b"),
-        (100, "restart",       r"\b(restart|reboot)\b"),
-        (100, "sleep",         r"\b(sleep|hibernate|suspend)\b"),
-        (100, "logoff",        r"\b(log\s*out|log\s*off|sign\s*out)\b"),
-        (90,  "vol_up",        r"\b(volume\s*up|increase\s*volume|louder|turn\s*up|sound\s*up)\b"),
-        (90,  "vol_down",      r"\b(volume\s*down|decrease\s*volume|quieter|turn\s*down|sound\s*down)\b"),
-        (90,  "vol_mute",      r"\b(mute|silence|quiet)\b"),
-        (85,  "vol_set",       r"\bvolume\s*(to\s*)?(\d+)\b"),
-        (90,  "bright_up",     r"\b(brightness\s*up|increase\s*brightness|brighter)\b"),
-        (90,  "bright_down",   r"\b(brightness\s*down|decrease\s*brightness|dimmer)\b"),
-        (85,  "bright_set",    r"\bbrightness\s*(to\s*)?(\d+)\b"),
-        (90,  "screenshot",    r"\b(screenshot|screen\s*shot|capture\s*screen|screengrab)\b"),
-        (88,  "youtube",       r"\b(play|watch)\b.*\b(youtube|you\s*tube|yt)\b"),
-        (87,  "media_ctrl",    r"^(pause|resume|stop)\b|^(play)\s+(the\s+)?(video|song|media|spotify|movie|music|it)$"),
-        (86,  "play_any",      r"^play\s+(.+)"),
-        (85,  "media_next",    r"\b(next|skip)\b.*\b(song|video|track)\b"),
-        (85,  "switch_window", r"\b(switch|change)\b.*\b(window|tab|app|screen)\b"),
-        (88,  "wa_call",       r"\b(call|video\s*call)\b.*\b(whatsapp|wa)\b"),
-        (88,  "wa_msg",        r"\b(message|msg|send|text|text\s*on)\b.*\b(whatsapp|wa)\b"),
-        (85,  "wa_open",       r"\b(open|launch)\b.*\bwhatsapp\b"),
-        (80,  "battery",       r"\b(battery|charge|power\s*level)\b"),
-        (80,  "sysinfo",       r"\b(cpu|ram|memory|processor|performance|system\s*stats)\b"),
-        (80,  "time",          r"\b(time|what\s*time|current\s*time)\b"),
-        (80,  "close",         r"\b(close|close\s*window|alt\s*f4)\b"),
-        (80,  "minimise",      r"\b(minimise|minimize)\b"),
-        (80,  "maximise",      r"\b(maximise|maximize|fullscreen)\b"),
-        (80,  "desktop",       r"\b(show\s*desktop|go\s*to\s*desktop)\b"),
-        (78,  "clip_read",     r"\b(clipboard|read\s*clipboard|what\s*is\s*(in\s*)?clipboard)\b"),
-        (78,  "type_text",     r"^type\s+.+"),
-        (75,  "web_search",    r"\b(search|google|bing|look\s*up|find\s*me|search\s*for|research)\b"),
-        (85,  "reminder",      r"\b(remind\s*me|set\s*(a\s*)?reminder|alarm|alert\s*me)\b"),
-        (95,  "clear_mem",     r"\b(clear\s*memory|forget|reset\s*memory|clear\s*history)\b"),
-        (95,  "repeat",        r"^(repeat|again|say\s*that\s*again)\b"),
-        (70,  "launch_app",    r"\b(open|launch|start|run|show\s*me|load|bring\s*up|fire\s*up)\b"),
-    ]
+# ══════════════════════════════════════════════════════════════════════════════════════
+# ██  ACTION DISPATCHER
+# ══════════════════════════════════════════════════════════════════════════════════════
+class ActionDispatcher:
+    def __init__(self, launcher: AppLauncher, sysinfo: SystemInfo,
+                 remind: ReminderModule):
+        self._l = launcher
+        self._s = sysinfo
+        self._r = remind
 
-    def __init__(self):
-        self.PATTERNS = []
-        for priority, intent, pattern in self._RAW_PATTERNS:
-            self.PATTERNS.append(
-                (priority, intent, re.compile(pattern, re.IGNORECASE))
-            )
-        self.PATTERNS.sort(key=lambda x: -x[0])
-
-    def parse(self, text: str) -> Optional[str]:
-        for _, intent, rx in self.PATTERNS:
-            if rx.search(text):
-                return intent
-        return None
-
-    def extract_number(self, text: str) -> Optional[int]:
-        m = re.search(r'\d+', text)
-        return int(m.group()) if m else None
-
-    def extract_after(self, text: str, keywords: List[str]) -> str:
-        t = text.lower()
-        for kw in sorted(keywords, key=len, reverse=True):
-            idx = t.find(kw)
-            if idx != -1:
-                return text[idx + len(kw):].strip()
-        return text
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# ██  V7.9 SPEECH ENGINE CONFIG (Fuzzy Shield + Context IQ)
-# ══════════════════════════════════════════════════════════════════════════════
-
-class SpeechConfigManager:
-    DEFAULT_CONFIG_PATH = "agent_speech_config.json"
-
-    # Deep-VAD config with Strict Confidence Filters
-    DEFAULT_CONFIG_PAYLOAD = {
-        "model": {
-            "size": "small",
-            "device": "cpu",
-            "compute_type": "int8",
-            "vram_unload_timeout_sec": 300
-        },
-        "audio": {
-            "sample_rate": 16000,
-            "chunk_duration_ms": 32, # Silero requires 512 samples = 32ms
-            "pre_speech_pad_sec": 0.5,
-            "post_speech_pad_sec": 1.2
-        },
-        "filters": {
-            "min_text_length": 3,
-            "min_confidence": 0.65, # Strict threshold
-            "ignore_hallucinations": [
-                "thank you.", "thanks for watching.", "thanks.", "bye.", "goodbye.",
-                "okay.", "ok.", "you.", "thank you very much.", "subscribe.",
-                "♪", "♫", "[music]", "[applause]", "[laughter]",
-                "...", "hm.", "hmm.", "mm.", "ah.", "uh.", "um.",
-                ".", " ", "", "\n", "\t", "[translated]", "[translation]", 
-                "subtitles by", "amara.org", "(speaking foreign language)", 
-                "(speaking hindi)", "translated by", "assistant ray", "english speech only"
-            ],
-            "noise_regex": (
-                r"^(hm+|uh+|ah+|oh+|mm+|er+|hmm+|uhh+|ehh+|aah+|ooh+|um+)"
-                r"[\.\?\!]?$"
-            )
-        },
-        "prompts": {
-            "base_identity": "Assistant Ray. English speech only.",
-            "base_commands": "open Chrome, search Google, play music, pause video, switch window.",
-            "proper_nouns": "RAY, ROY, RAYE, WhatsApp, YouTube, Chrome, Spotify, VS Code.",
-            "contexts": {}
-        }
-    }
-
-    def __init__(self, config_path: str = DEFAULT_CONFIG_PATH):
-        self.config_path = config_path
-        self._config_cache: Dict[str, Any] = {}
-        self._last_modified_time: float = 0.0
-        self._compiled_noise_regex = None
-        self._hallucination_set: Set[str] = set()
-        self._lock = threading.RLock()
-
-        self.ensure_config_exists()
-        self.load_config()
-
-    def ensure_config_exists(self):
-        if not os.path.exists(self.config_path):
-            log.info(f"Generating optimized config...")
-            try:
-                with open(self.config_path, 'w', encoding='utf-8') as f:
-                    json.dump(self.DEFAULT_CONFIG_PAYLOAD, f, indent=4)
-            except Exception as e:
-                pass
-
-    def load_config(self) -> None:
-        with self._lock:
-            try:
-                with open(self.config_path, 'r', encoding='utf-8') as f:
-                    self._config_cache = json.load(f)
-                self._last_modified_time = os.path.getmtime(self.config_path)
-
-                filters = self._config_cache.get("filters", {})
-                self._hallucination_set = set(
-                    [x.lower() for x in filters.get("ignore_hallucinations", [])]
-                )
-                regex_str = filters.get("noise_regex", "")
-                if regex_str:
-                    self._compiled_noise_regex = re.compile(regex_str, re.IGNORECASE)
-            except Exception as e:
-                self._config_cache = self.DEFAULT_CONFIG_PAYLOAD
-
-    def hot_reload_if_changed(self) -> None:
+    def execute(self, action: str, raw_query: str) -> str:
         try:
-            current_mtime = os.path.getmtime(self.config_path)
-            if current_mtime > self._last_modified_time:
-                self.load_config()
-        except OSError:
-            pass
-
-    def get(self, *keys, default=None) -> Any:
-        with self._lock:
-            val = self._config_cache
-            for key in keys:
-                if isinstance(val, dict):
-                    val = val.get(key)
-                else:
-                    return default
-            return val if val is not None else default
-
-    def get_dynamic_prompt(self, active_app_context: Optional[str] = None) -> str:
-        prompts = self.get("prompts", default={})
-        parts = [
-            prompts.get("base_identity", ""),
-            prompts.get("base_commands", ""),
-            prompts.get("proper_nouns", "")
-        ]
-
-        # EXPO UPGRADE: Active Window IQ Logic
-        if active_app_context:
-            ctx_lower = active_app_context.lower()
-            if any(x in ctx_lower for x in ["code", "pycharm", "studio"]):
-                parts.append("Expect coding terms: python, functions, variables, syntax.")
-            elif any(x in ctx_lower for x in ["chrome", "edge", "firefox", "brave"]):
-                parts.append("Expect web terms: domains, search, tabs, refresh.")
-            elif any(x in ctx_lower for x in ["spotify", "youtube", "vlc", "media"]):
-                parts.append("Expect media terms: play, pause, next track, volume.")
-
-        final_prompt = " ".join(filter(bool, parts))
-        return re.sub(r'\s+', ' ', final_prompt).strip()
-
-class AgentState(Enum):
-    IDLE                  = auto()
-    AWAITING_CONFIRMATION = auto()
-    DICTATION             = auto()
-    WAKE_WORD_ONLY        = auto()
-
-@dataclass
-class FilterConfig:
-    base_min_confidence: float = 0.65 
-    length_1_2_multiplier: float = 2.0
-    length_3_5_multiplier: float = 1.6
-    min_entropy_threshold: float = 1.7
-
-    absolute_blacklist: Set[str] = field(default_factory=lambda: {
-        "thank you.", "thanks for watching.", "thanks.", "bye.", "goodbye.",
-        "thank you very much.", "subscribe.", "subscribe to my channel.",
-        "♪", "♫", "[music]", "[applause]", "[laughter]", "[blank_audio]",
-        "translated by", "subtitles by", "amara.org", "you.", "[translated]",
-        "[translation]", "(speaking foreign language)", "assistant ray english speech only",
-        "assistant ray english only", "assistant ray", "english speech only"
-    })
-    soft_blacklist: Set[str] = field(default_factory=lambda: {
-        "okay.", "ok.", "hm.", "hmm.", "mm.", "ah.", "uh.", "um.",
-        "...", ".", " ", "", "\n", "\t", "yes.", "no.",
-        "umm", "uhh", "aah", "acha", "arre", "like"
-    })
-    confirmation_whitelist: Set[str] = field(default_factory=lambda: {
-        "okay", "ok", "yes", "no", "yeah", "yep", "nope", "cancel",
-        "stop", "go ahead", "do it", "sure", "fine"
-    })
-    noise_regex_str: str = r'^(hm+|uh+|ah+|oh+|mm+|er+|hmm+|uhh+|ehh+|aah+|ooh+|um+)[\.\?!]?$'
-
-class ContextAwareTextFilter:
-    def __init__(self, config: Optional[FilterConfig] = None):
-        self.config       = config or FilterConfig()
-        self.noise_pattern = re.compile(self.config.noise_regex_str, re.IGNORECASE)
+            result = self._run(action, raw_query)
+            self._auto_clipboard(result or raw_query)
+            return result
+        except Exception as ex:
+            log.error("Action [%s] failed: %s", action, ex)
+            return ""
 
     @staticmethod
-    def calculate_shannon_entropy(text: str) -> float:
-        if not text: return 0.0
-        text = text.replace(" ", "").lower()
-        if not text: return 0.0
-        char_array    = np.frombuffer(text.encode('utf-8'), dtype=np.uint8)
-        _, counts     = np.unique(char_array, return_counts=True)
-        probabilities = counts / counts.sum()
-        entropy = -float(np.sum(probabilities * np.log2(probabilities + 1e-12)))
-        return entropy
-
-    def get_required_confidence(self, text: str, state: AgentState) -> float:
-        base_conf = self.config.base_min_confidence
-        length = len(text.strip())
-        if length <= 2: return min(0.99, base_conf * self.config.length_1_2_multiplier)
-        elif 3 <= length <= 5: return min(0.95, base_conf * self.config.length_3_5_multiplier)
-        else: return base_conf
-
-    def evaluate(self, raw_text: str, confidence: float, agent_state: AgentState = AgentState.IDLE) -> Tuple[bool, str, Optional[str]]:
-        t_raw   = raw_text.strip()
-        t_lower = t_raw.lower()
-
-        if not t_lower: return False, "", "NULL_OR_EMPTY"
-
-        # --- EXPO UPGRADE: FUZZY HALLUCINATION SHIELD ---
-        for bad_word in self.config.absolute_blacklist:
-            if bad_word in t_lower:
-                return False, t_raw, f"ABSOLUTE_BLACKLIST ({t_lower})"
-            
-            # Fuzzy match intercept (crushes slight variations of hallucinated prompts)
-            if len(t_lower) > 5 and len(bad_word) > 5:
-                ratio = difflib.SequenceMatcher(None, t_lower, bad_word).ratio()
-                if ratio > 0.80:
-                    return False, t_raw, f"FUZZY_BLACKLIST ({t_lower} ~ {bad_word})"
-        # ------------------------------------------------
-
-        if self.noise_pattern.match(t_lower):
-            return False, t_raw, f"NOISE_REGEX_MATCH ({t_lower})"
-
-        if agent_state == AgentState.IDLE and t_lower in self.config.soft_blacklist:
-            return False, t_raw, f"SOFT_BLACKLIST ({t_lower})"
-
-        if all(not c.isalnum() for c in t_lower):
-            return False, t_raw, "NON_ALPHANUMERIC"
-
-        if len(t_lower) > 4:
-            entropy = self.calculate_shannon_entropy(t_lower)
-            if entropy < self.config.min_entropy_threshold:
-                return False, t_raw, f"LOW_ENTROPY ({entropy:.2f})"
-
-        req_conf = self.get_required_confidence(t_lower, agent_state)
-        if confidence < req_conf:
-            return False, t_raw, f"CONFIDENCE_CURVE (Conf: {confidence:.2f} < Req: {req_conf:.2f})"
-
-        return True, t_raw, None
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# ██  STUDIO GRADE SILERO VAD AUDIO PIPELINE
-# ══════════════════════════════════════════════════════════════════════════════
-class StudioGradeAudioStreamer:
-    def __init__(
-        self,
-        sample_rate:         int   = 16000,
-        pre_speech_pad_sec:  float = 0.5,
-        post_speech_pad_sec: float = 1.2
-    ):
-        self.RATE              = sample_rate
-        self.CHUNK_SIZE        = 512 # Silero required size
-        self.FORMAT            = pyaudio.paInt16
-        self.CHANNELS          = 1
-        
-        # Load Deep-VAD
-        log.info("Loading Silero VAD neural net...")
-        self.silero_model, utils = torch.hub.load(repo_or_dir='snakers4/silero-vad', model='silero_vad', force_reload=False)
-        self.silero_model.eval()
-        
-        self.pa                = pyaudio.PyAudio()
-        self.stream            = None
-
-        self.pre_buffer_chunks  = int((pre_speech_pad_sec * 16000) / 512)
-        self.ring_buffer        = collections.deque(maxlen=self.pre_buffer_chunks)
-
-        self.silence_limit_chunks = int((post_speech_pad_sec * 16000) / 512)
-
-        self.is_running           = False
-        self.is_listening_paused  = False
-        self._shutdown_flag       = threading.Event()
-        self.speech_queue         = queue.Queue()
-
-    def start(self):
-        if self.is_running: return
-        self.is_running = True
-        self._shutdown_flag.clear()
-        threading.Thread(target=self._capture_daemon, daemon=True).start()
-        log.info("🎙 Studio Streamer Started.")
-
-    def stop(self):
-        self.is_running = False
-        self._shutdown_flag.set()
-
-    def pause_listening(self):
-        self.is_listening_paused = True
-
-    def resume_listening(self):
-        self.ring_buffer.clear()
-        self.is_listening_paused = False
-
-    def _capture_daemon(self):
-        while not self._shutdown_flag.is_set():
-            try:
-                self.stream = self.pa.open(
-                    format=self.FORMAT, channels=self.CHANNELS, rate=self.RATE,
-                    input=True, frames_per_buffer=self.CHUNK_SIZE, start=False
-                )
-                self.stream.start_stream()
-                break
-            except Exception:
-                time.sleep(1)
-
-        is_speaking_state = False
-        silence_counter   = 0
-        phrase_buffer     = []
-
-        while not self._shutdown_flag.is_set():
-            try:
-                chunk = self.stream.read(self.CHUNK_SIZE, exception_on_overflow=False)
-            except: continue
-
-            if self.is_listening_paused: continue
-
-            # Numpy float conversion
-            audio_np = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
-            
-            # --- EXPO: TITANIUM AUDIO GATE (PROXIMITY) ---
-            rms_volume = float(np.sqrt(np.mean(audio_np**2)))
-            
-            # --- EXPO: NEURAL NOISE REDUCTION ---
-            # Try to heavily denoise the chunk
-            try:
-                clean_audio = nr.reduce_noise(y=audio_np, sr=16000, stationary=True, prop_decrease=0.85)
-            except:
-                clean_audio = audio_np # Fallback
-
-            # --- SILERO VAD DETECTION ---
-            tensor_chunk = torch.from_numpy(clean_audio)
-            vad_prob = 0.0
-            if len(tensor_chunk) == 512:
-                with torch.no_grad():
-                    vad_prob = self.silero_model(tensor_chunk, 16000).item()
-
-            # To trigger speech, it must be HUMAN (vad > 0.6) AND LOUD ENOUGH (rms > 0.015)
-            is_speech_chunk = (vad_prob > 0.6) and (rms_volume > 0.015)
-
-            if not is_speaking_state:
-                self.ring_buffer.append(audio_np) # Append un-denoised audio so Whisper hears natural voice
-                if is_speech_chunk:
-                    is_speaking_state = True
-                    phrase_buffer.extend(self.ring_buffer)
-                    self.ring_buffer.clear()
-                    silence_counter = 0
-            else:
-                phrase_buffer.append(audio_np)
-                if is_speech_chunk:
-                    silence_counter = 0
-                else:
-                    silence_counter += 1
-                    if silence_counter > self.silence_limit_chunks:
-                        is_speaking_state = False
-                        complete_audio = np.concatenate(phrase_buffer)
-                        self.speech_queue.put(complete_audio)
-                        phrase_buffer = []
-                        silence_counter = 0
-
-    def get_next_numpy_audio(self, timeout: float = 0.5) -> Optional[np.ndarray]:
-        try:
-            return self.speech_queue.get(timeout=timeout)
-        except queue.Empty:
-            return None
-
-class AsyncWhisperManager:
-    UNLOADED = "UNLOADED"
-    LOADING  = "LOADING"
-    READY    = "READY"
-    ERROR    = "ERROR"
-
-    def __init__(self, config: SpeechConfigManager):
-        self.config                       = config
-        self.model: Optional[WhisperModel] = None
-        self.state                        = self.UNLOADED
-        self._model_lock                  = threading.RLock()
-        self._last_used_timestamp         = time.time()
-        self._shutdown_flag               = threading.Event()
-        threading.Thread(target=self._vram_watchdog_loop, daemon=True).start()
-        self.ensure_model_loaded_async()
-
-    def ensure_model_loaded_async(self) -> None:
-        with self._model_lock:
-            if self.state in [self.READY, self.LOADING]: return
-            self.state = self.LOADING
-        threading.Thread(target=self._load_model_routine, daemon=True).start()
-
-    def _load_model_routine(self) -> None:
-        try:
-            temp_model = WhisperModel("small", device="cpu", compute_type="int8")
-            with self._model_lock:
-                self.model = temp_model
-                self.state = self.READY
-                self._last_used_timestamp = time.time()
-        except:
-            self.state = self.ERROR
-
-    def unload_model(self) -> None:
-        with self._model_lock:
-            del self.model
-            self.model = None
-            gc.collect()
-            self.state = self.UNLOADED
-
-    def _vram_watchdog_loop(self) -> None:
-        while not self._shutdown_flag.is_set():
-            time.sleep(10)
-            with self._model_lock:
-                if self.state != self.READY: continue
-            if (time.time() - self._last_used_timestamp) >= 300:
-                self.unload_model()
-
-    def get_active_model(self) -> Optional[WhisperModel]:
-        with self._model_lock:
-            if self.state == self.UNLOADED:
-                self.ensure_model_loaded_async()
-                return None
-            if self.state == self.READY:
-                self._last_used_timestamp = time.time()
-                return self.model
-            return None
-
-    def shutdown(self) -> None:
-        self._shutdown_flag.set()
-        self.unload_model()
-
-class AdvancedTranscriptionEngine:
-    def __init__(self, model_reference: WhisperModel, base_prompt: str, cognitive_filter: ContextAwareTextFilter):
-        self.model = model_reference
-        self.base_prompt = base_prompt
-        self.filter = cognitive_filter
-        self._inference_lock = threading.RLock()
-
-    def transcribe_numpy(self, audio_np: np.ndarray, agent_state: AgentState) -> Optional[str]:
-        if audio_np is None or len(audio_np) == 0: return None
-
-        audio_dur = len(audio_np) / 16000
-        beam, best = (1, 1) if audio_dur <= 2.5 else (5, 5)
-
-        with self._inference_lock:
-            try:
-                segments, info = self.model.transcribe(
-                    audio_np, language="en", task="transcribe", beam_size=beam, best_of=best,
-                    temperature=0.0, condition_on_previous_text=False, no_speech_threshold=0.6,
-                    initial_prompt=self.base_prompt
-                )
-                text = " ".join(s.text.strip() for s in segments).strip()
-                text = re.sub(r'^[\s\.\,\!\?]+|[\s\.\,\!\?]+$', '', text).strip()
-                confidence = info.language_probability
-            except: return None
-
-        if not text: return None
-        is_valid, final_text, drop_reason = self.filter.evaluate(text, confidence, agent_state)
-        if not is_valid: return None
-        return final_text
-
-
-class UltimateSpeechEngine:
-    def __init__(self, config_path: str = SpeechConfigManager.DEFAULT_CONFIG_PATH):
-        self.config = SpeechConfigManager(config_path=config_path)
-        self.text_filter = ContextAwareTextFilter()
-        self.streamer = StudioGradeAudioStreamer()
-        self.whisper_mgr = AsyncWhisperManager(self.config)
-        self._transcription_engine = None
-        self._engine_lock = threading.Lock()
-
-    def start_listening(self): self.streamer.start()
-    def pause_for_tts(self): self.streamer.pause_listening()
-    def resume_after_tts(self): self.streamer.resume_listening()
-
-    def process_next_phrase(self, current_app_context: Optional[str] = None, agent_state: AgentState = AgentState.IDLE) -> Optional[str]:
-        audio_np = self.streamer.get_next_numpy_audio(timeout=0.5)
-        
-        if audio_np is not None:
-            audio_np = audio_np * 2.4  
-
-        if audio_np is None: return None
-
-        model = self.whisper_mgr.get_active_model()
-        if model is None: return None
-
-        with self._engine_lock:
-            if self._transcription_engine is None or self._transcription_engine.model is not model:
-                self._transcription_engine = AdvancedTranscriptionEngine(model, self.config.get_dynamic_prompt(current_app_context), self.text_filter)
-
-        return self._transcription_engine.transcribe_numpy(audio_np, agent_state)
-
-class CommandStitcher:
-    def __init__(self):
-        self.pending_buffer = ""
-        self.last_update_time = 0
-        self.DANGLING_TRIGGERS = ["open", "play", "search", "search for", "message", "call", "turn", "set", "type", "look up", "the", "a", "can you", "could you", "to", "on"]
-
-    def process_chunk(self, text: str) -> Tuple[bool, str]:
-        now = time.time()
-        if now - self.last_update_time > 7: self.pending_buffer = ""
-        combined_text = f"{self.pending_buffer} {text}".strip()
-        self.pending_buffer = combined_text
-        self.last_update_time = now
-
-        words = combined_text.lower().split()
-        if not words: return True, combined_text
-
-        last_word = words[-1]
-        last_two = " ".join(words[-2:]) if len(words) >= 2 else ""
-
-        if last_word in self.DANGLING_TRIGGERS or last_two in self.DANGLING_TRIGGERS:
-            return False, combined_text
-
-        self.pending_buffer = ""
-        return True, combined_text
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# ██  OMNI-ASSISTANT MASTER LOOP
-# ══════════════════════════════════════════════════════════════════════════════
-class OmniAssistant:
-    
-    EXPLICIT_WORDS = {
-        "porn", "sex", "xxx", "nsfw", "nude", "boob", "boobs", "ass", 
-        "fuck", "bitch", "shit", "tits", "dick", "pussy"
-    }
-    
-    def __init__(self, root: tk.Tk, gui: RayRoyOverlay):
-        self.root     = root
-        self.gui      = gui
-        self.tts      = TTSEngine()
-        self.llm      = LLMBrain()
-
-        self.speech   = UltimateSpeechEngine()
-
-        self.wake     = WakeWordDetector()
-        self.stitcher = CommandStitcher()
-        self.parser   = CommandParser()
-        self.launcher = AppLauncher()
-        self.sysinfo  = SystemInfo()
-        self.remind   = ReminderModule(self.tts, self._reminder_callback)
-
-        self._last_reply    = ""
-        self._cmd_history   = collections.deque(maxlen=20)
-        self._is_processing = False
-
-        log.info("=" * 60)
-        log.info("  R A Y  /  R O Y  v7.9  —  EXPO APEX ONLINE")
-        log.info("=" * 60)
-
-        self.gui.append_text("SYSTEM", "Agent online. Systems green.", "system")
-        self.tts.speak_async("I'm awake. Let's do this.")
-
-    def listen_loop(self):
-        self.speech.start_listening()
-
-        while True:
-            # EXPO: Fetch the active window title dynamically
-            active_ctx = get_active_window_title()
-            
-            text = self.speech.process_next_phrase(
-                current_app_context=active_ctx,
-                agent_state=AgentState.IDLE
-            )
-            
-            if text is None: continue
-
-            if self.wake.contains_wake_word(text):
-                clean_cmd = self.wake.strip_wake_word(text)
-                is_complete, final_cmd = self.stitcher.process_chunk(clean_cmd)
-                if not is_complete: continue
-                
-                self.speech.pause_for_tts()
-
-                if not final_cmd.strip():
-                    prompt_text = random.choice([
-                        "Yeah? What do you want now?", 
-                        "I'm listening. Make it good.", 
-                        "Speak up, what's the plan?"
-                    ])
-                    self.gui.append_text("AGENT", prompt_text, "agent")
-                    self.gui.set_status("◉ SPEAKING...", "#00ffcc")
-                    self.tts.speak(prompt_text)
-                    self.gui.set_status("● LISTENING", "#00d4ff")
-                    self.speech.resume_after_tts()
-                    continue
-
-                threading.Thread(target=self._safe_handle, args=(final_cmd,), daemon=True).start()
-
-    def _safe_handle(self, query: str):
-        try:
-            self._is_processing = True
-            self.gui.set_status("⚙ PROCESSING...", "#ff4fcf")
-            self.handle_query(query)
-        except Exception as e:
-            err = "Wow, something just exploded in my brain. Let's try that again."
-            self.gui.append_text("ERROR", err, "error")
-            self.gui.set_status("◉ SPEAKING...", "#00ffcc")
-            self.tts.speak(err)
-        finally:
-            self._is_processing = False
-            self.gui.set_status("● LISTENING", "#00d4ff")
-            self.speech.resume_after_tts()
-
-    def handle_query(self, query: str):
-        q = query.lower().strip()
-        self.gui.append_text("USER", query)
-        self._cmd_history.append(query)
-
-        if any(bad_word in q for bad_word in self.EXPLICIT_WORDS):
-            reply = "Nice try bro, but I'm not searching that on a university screen. Keep it PG."
-            self.gui.append_text("AGENT", reply, "agent")
-            self.gui.set_status("◉ SPEAKING...", "#00ffcc")
-            self.tts.speak(reply)
+    def _auto_clipboard(text: str):
+        if not HAS_PYPERCLIP or not text:
             return
+        match = _CLIPBOARD_PATTERNS.search(text)
+        if match:
+            try:
+                pyperclip.copy(match.group(0))
+                rprint("CLIP", f"Auto-copied: {match.group(0)[:80]}", "yellow")
+            except Exception as ex:
+                log.debug("Clipboard copy failed: %s", ex)
 
-        reply = self._route(q, query)
+    def _run(self, action: str, q: str) -> str:
+        ql = q.lower()
 
-        self._last_reply = reply
-        self.gui.append_text("AGENT", reply, "agent")
-        self.gui.set_status("◉ SPEAKING...", "#00ffcc")
-        self.tts.speak(reply)
+        if action == "battery_status": return self._s.battery()
+        if action == "system_info":    return self._s.cpu_ram()
+        if action == "current_time":   return self._s.current_time()
 
-    def _route(self, q: str, raw: str) -> str:
-        intent = self.parser.parse(q)
-
-        # NEUTERED LETHAL COMMANDS
-        if intent in ["shutdown", "restart", "sleep", "logoff", "self_destruct"]:
-            return "Nice try, but system power controls are strictly locked for the Expo."
-
-        if intent == "clear_mem": return self.llm.clear_history()
-        if intent == "repeat": return self._last_reply or "I haven't said anything yet."
-        if intent == "lock":
-            ctypes.windll.user32.LockWorkStation()
-            return "Locked it."
-        
-        if intent == "vol_up":
-            [pyautogui.press("volumeup") for _ in range(5)]
-            return "Boom. Louder."
-
-        if intent == "vol_down":
-            [pyautogui.press("volumedown") for _ in range(5)]
-            return "Quiet down now."
-
-        if intent == "vol_mute":
+        if action == "volume_up":
+            [pyautogui.press("volumeup") for _ in range(5)]; return ""
+        if action == "volume_down":
+            [pyautogui.press("volumedown") for _ in range(5)]; return ""
+        if action == "volume_mute":
+            pyautogui.press("volumemute"); return ""
+        if action == "volume_set":
+            n = self._num(ql) or 50
+            n = max(0, min(100, n))
+            pyautogui.press("volumemute"); time.sleep(0.1)
             pyautogui.press("volumemute")
-            return "Muted."
+            for _ in range(n // 2): pyautogui.press("volumeup")
+            return ""
 
-        if intent == "vol_set": return self._volume_set(q)
+        if action == "brightness_up":
+            if HAS_SBC: sbc.set_brightness("+25"); return ""
+        if action == "brightness_down":
+            if HAS_SBC: sbc.set_brightness("-25"); return ""
+        if action == "brightness_set":
+            n = self._num(ql) or 70
+            if HAS_SBC: sbc.set_brightness(min(100, n)); return ""
 
-        if intent == "bright_up":
-            if HAS_SBC: sbc.set_brightness('+25')
-            return "Brightness up."
+        if action == "screenshot":
+            desk = os.path.join(os.path.expanduser("~"), "Desktop")
+            path = os.path.join(desk, f"Roy_{int(time.time())}.png")
+            pyautogui.screenshot().save(path)
+            self._auto_clipboard(path)
+            return ""
 
-        if intent == "bright_down":
-            if HAS_SBC: sbc.set_brightness('-25')
-            return "Dimming it down."
+        if action == "play_youtube":
+            song = re.sub(
+                r"\b(play|watch|on|youtube|you\s*tube|yt)\b", "", ql, flags=re.I
+            ).strip()
+            if song: pywhatkit.playonyt(song)
+            return ""
 
-        if intent == "bright_set":
-            n = self.parser.extract_number(q)
-            if HAS_SBC and n: sbc.set_brightness(min(100, n))
-            return f"Brightness set to {n}%." if n else "Tell me an actual number."
+        if action == "media_toggle":  pyautogui.press("playpause"); return ""
+        if action == "media_next":    pyautogui.press("nexttrack");  return ""
 
-        if intent == "screenshot":
-            desktop = os.path.join(os.path.expanduser("~"), "Desktop")
-            shot = pyautogui.screenshot()
-            shot.save(os.path.join(desktop, f"Capture_{int(time.time())}.png"))
-            return "Screenshot saved to your desktop."
+        if action == "switch_window": pyautogui.hotkey("alt", "tab");       return ""
+        if action == "close_window":  pyautogui.hotkey("alt", "f4");        return ""
+        if action == "minimize":      pyautogui.hotkey("win", "down");      return ""
+        if action == "maximize":      pyautogui.hotkey("win", "up");        return ""
+        if action == "show_desktop":  pyautogui.hotkey("win", "d");         return ""
+        if action == "lock_screen":   ctypes.windll.user32.LockWorkStation(); return ""
 
-        if intent in ["youtube", "play_any"]:
-            song = re.sub(r'\b(play|watch|on|youtube|you\s*tube|yt)\b', '', q, flags=re.IGNORECASE).strip()
-            if song:
-                pywhatkit.playonyt(song)
-                return f"Firing up {song}."
-            return "Play what exactly? You forgot to tell me."
+        if action == "open_app":
+            return self._l.try_launch(ql) or ""
 
-        if intent == "media_ctrl":
-            pyautogui.press("playpause")
-            return "Toggled playback."
-        if intent == "media_next":
-            pyautogui.press("nexttrack")
-            return "Skipping that."
-        if intent == "switch_window":
-            pyautogui.hotkey("alt", "tab")
-            return "Switched windows."
+        if action == "web_search":
+            sq = re.sub(
+                r"\b(search|google|bing|look\s*up|find|research)\b", "", ql, flags=re.I
+            ).strip()
+            if sq:
+                webbrowser.open(
+                    f"https://www.google.com/search?q={sq.replace(' ', '+')}",
+                    new=2)
+            return ""
 
-        if intent == "wa_call":
-            contact = re.sub(r'\b(call|video\s*call|on|whatsapp|wa)\b', '', q, flags=re.IGNORECASE).strip()
+        if action == "type_text":
+            content = re.sub(r"^\s*type\s+", "", ql, flags=re.I).strip()
+            if content: pyautogui.write(content, interval=0.04)
+            return ""
+
+        if action == "whatsapp_open":
+            subprocess.Popen("start whatsapp:", shell=True); return ""
+        if action == "whatsapp_call":
+            contact = re.sub(
+                r"\b(call|video\s*call|on|whatsapp|wa)\b", "", ql, flags=re.I
+            ).strip()
             subprocess.Popen("start whatsapp:", shell=True)
             time.sleep(3)
             pyautogui.hotkey("ctrl", "f")
             pyautogui.write(contact, interval=0.04)
             time.sleep(1)
             pyautogui.press("enter")
-            return f"Calling {contact} on WhatsApp."
+            return ""
+        if action == "whatsapp_message":
+            subprocess.Popen("start whatsapp:", shell=True); return ""
 
-        if intent in ("wa_msg", "wa_open"):
-            subprocess.Popen("start whatsapp:", shell=True)
-            return "WhatsApp is open."
+        if action == "reminder":
+            m = re.search(r"(\d+)\s*(minute|min|second|sec|hour|hr)", ql, re.I)
+            if not m:
+                return "Couldn't parse a time from that."
+            amt, unit = int(m.group(1)), m.group(2).lower()
+            secs = (amt if unit.startswith("sec")
+                    else amt * 3600 if unit.startswith("hr")
+                    else amt * 60)
+            mm = re.search(r"\bto\b(.+)$", ql, re.I)
+            self._r.add(secs, mm.group(1).strip() if mm else "your reminder")
+            return ""
 
-        if intent == "battery": return self.sysinfo.battery()
-        if intent == "sysinfo": return self.sysinfo.cpu_ram()
-        if intent == "time": return self.sysinfo.current_time()
-        
-        if intent == "close":
-            pyautogui.hotkey("alt", "f4")
-            return "Killed it."
-        if intent == "minimise":
-            pyautogui.hotkey("win", "down")
-            return "Minimised."
-        if intent == "maximise":
-            pyautogui.hotkey("win", "up")
-            return "Maximised."
-        if intent == "desktop":
-            pyautogui.hotkey("win", "d")
-            return "Desktop shown."
+        return ""
 
-        if intent == "type_text":
-            content = self.parser.extract_after(q, ["type"])
-            if content:
-                pyautogui.write(content, interval=0.04)
-                return "Typed it."
-            return "Type what?"
-
-        if intent == "web_search":
-            query_str = self.parser.extract_after(q, ["search for", "search", "google", "research"])
-            if query_str:
-                webbrowser.open(f"https://www.google.com/search?q={query_str.replace(' ', '+')}&safe=active")
-                return self.llm.query(raw)
-            return "What do you want me to Google?"
-
-        if intent == "reminder":
-            m = re.search(r'(\d+)\s*(minute|min|second|sec|hour|hr)', q, re.IGNORECASE)
-            if not m: return "Couldn't figure out the time."
-            amount, unit = int(m.group(1)), m.group(2).lower()
-            secs = amount if unit.startswith("sec") else (amount * 3600 if unit.startswith("hr") else amount * 60)
-            msg_m = re.search(r'\bto\b(.+)$', q, re.IGNORECASE)
-            self.remind.add(secs, msg_m.group(1).strip() if msg_m else "your reminder is up")
-            return f"Reminder set for {amount} {unit}s."
-
-        if intent == "launch_app":
-            result = self.launcher.try_launch(q)
-            if result: return result
-
-        return self.llm.query(raw)
-
-    def _volume_set(self, q: str) -> str:
-        n = self.parser.extract_number(q)
-        if n is None: return "Give me a number."
-        n = max(0, min(100, n))
-        pyautogui.press("volumemute")
-        time.sleep(0.1)
-        pyautogui.press("volumemute")
-        for _ in range(n // 2): pyautogui.press("volumeup")
-        return f"Volume locked at {n}%."
-
-    def _reminder_callback(self, text: str):
-        self.gui.append_text("SYSTEM", text, "system")
+    @staticmethod
+    def _num(text: str) -> Optional[int]:
+        m = re.search(r"\d+", text)
+        return int(m.group()) if m else None
 
 
-class AutoDiagnosticsManager:
-    def __init__(self, tts: TTSEngine, llm: LLMBrain):
-        self.tts = tts
-        self.llm = llm
-        sys.excepthook = self.handle_exception
+# ══════════════════════════════════════════════════════════════════════════════════════
+# ██  AUDIO PIPELINE — Silero VAD + Phrase-Level Neural Denoise + Whisper CUDA
+# ══════════════════════════════════════════════════════════════════════════════════════
+class AgentState(Enum):
+    IDLE                  = auto()
+    AWAITING_CONFIRMATION = auto()
 
-    def handle_exception(self, exc_type, exc_value, exc_traceback):
-        if issubclass(exc_type, KeyboardInterrupt):
-            sys.__excepthook__(exc_type, exc_value, exc_traceback)
-            return
-        tb_lines = traceback.format_exception(exc_type, exc_value, exc_traceback)
+
+@dataclass
+class FilterConfig:
+    base_min_confidence:   float = 0.39
+    length_1_2_multiplier: float = 2.0
+    length_3_5_multiplier: float = 1.6
+    min_entropy_threshold: float = 1.7
+    absolute_blacklist: Set[str] = field(default_factory=lambda: {
+        "thank you.", "thanks for watching.", "thanks.", "bye.", "goodbye.",
+        "thank you very much.", "subscribe.", "♪", "♫", "[music]", "[applause]",
+        "[laughter]", "[blank_audio]", "translated by", "subtitles by", "you.",
+        "[translated]", "[translation]", "(speaking foreign language)",
+        "assistant ray english speech only", "assistant ray english only",
+        "assistant ray", "english speech only",
+    })
+    soft_blacklist: Set[str] = field(default_factory=lambda: {
+        "okay.", "ok.", "hm.", "hmm.", "mm.", "ah.", "uh.", "um.",
+        "...", ".", " ", "", "\n", "\t", "yes.", "no.",
+    })
+    noise_regex_str: str = (
+        r"^(hm+|uh+|ah+|oh+|mm+|er+|hmm+|uhh+|ehh+|aah+|ooh+|um+)[\.\?!]?$"
+    )
+
+
+class ContextAwareTextFilter:
+    def __init__(self, cfg: FilterConfig = None):
+        self.cfg    = cfg or FilterConfig()
+        self._noise = re.compile(self.cfg.noise_regex_str, re.IGNORECASE)
+
+    @staticmethod
+    def _entropy(text: str) -> float:
+        text = text.replace(" ", "").lower()
+        if not text:
+            return 0.0
+        arr  = np.frombuffer(text.encode("utf-8"), dtype=np.uint8)
+        _, c = np.unique(arr, return_counts=True)
+        p    = c / c.sum()
+        return -float(np.sum(p * np.log2(p + 1e-12)))
+
+    def evaluate(self, raw: str, conf: float,
+                 state: AgentState = AgentState.IDLE) -> Tuple[bool, str, Optional[str]]:
+        t  = raw.strip()
+        tl = t.lower()
+        if not tl:
+            return False, t, "EMPTY"
+
+        for bad in self.cfg.absolute_blacklist:
+            if bad in tl:
+                return False, t, "BLACKLIST"
+            if len(tl) > 5 and len(bad) > 5:
+                if difflib.SequenceMatcher(None, tl, bad).ratio() > 0.80:
+                    return False, t, "FUZZY_BLACKLIST"
+
+        if self._noise.match(tl):
+            return False, t, "NOISE"
+        if state == AgentState.IDLE and tl in self.cfg.soft_blacklist:
+            return False, t, "SOFT_BLACKLIST"
+        if all(not c.isalnum() for c in tl):
+            return False, t, "NON_ALPHA"
+        if len(tl) > 4 and self._entropy(tl) < self.cfg.min_entropy_threshold:
+            return False, t, "LOW_ENTROPY"
+
+        ln = len(tl)
+        req = (min(0.99, self.cfg.base_min_confidence * self.cfg.length_1_2_multiplier) if ln <= 2
+               else min(0.95, self.cfg.base_min_confidence * self.cfg.length_3_5_multiplier) if ln <= 5
+               else self.cfg.base_min_confidence)
+        if conf < req:
+            return False, t, f"LOW_CONF({conf:.2f}<{req:.2f})"
+
+        return True, t, None
+
+
+class StudioGradeAudioStreamer:
+    """
+    Silero VAD + phrase-level neural noise reduction.
+
+    v15: no changes to this class from v14.
+    post_pad 1.5s, VAD thresh 0.50, RMS 0.008, phrase-NR at end,
+    dedicated _ptt_buf accumulator, max_phrase_chunks 20s cap,
+    stream error recovery with sleep+retry.
+    """
+
+    def __init__(self, sample_rate: int = 16000,
+                 pre_pad: float = 0.8, post_pad: float = 1.5):
+        self.RATE     = sample_rate
+        self.CHUNK    = 512
+        self.FORMAT   = pyaudio.paInt16
+        self.CHANNELS = 1
+
+        log.info("Loading Silero VAD neural net...")
         try:
-            with open("ray_crash_reports.log", "a", encoding="utf-8") as f:
-                f.write(f"\n[{datetime.datetime.now()}] CRASH:\n{''.join(tb_lines)}\n")
-        except: pass
+            self.vad, _ = torch.hub.load(
+                "snakers4/silero-vad", "silero_vad", force_reload=False
+            )
+            self.vad.eval()
+            log.info("Silero VAD loaded successfully.")
+        except Exception as ex:
+            log.error("Silero VAD load failed: %s", ex)
+            self.vad = None
 
+        self.pa        = pyaudio.PyAudio()
+        self.pre_buf   = collections.deque(maxlen=int((pre_pad * self.RATE) / self.CHUNK))
+        self.sil_limit = int((post_pad * self.RATE) / self.CHUNK)
+        self.max_phrase_chunks = int((20.0 * self.RATE) / self.CHUNK)
+
+        self.is_running = False
+        self.is_paused  = False
+        self._stop      = threading.Event()
+        self.speech_q   = queue.Queue()
+
+        self._ptt_buf:    List[np.ndarray] = []
+        self._ptt_active: bool             = False
+        self._ptt_lock:   threading.Lock   = threading.Lock()
+
+        log.info(
+            "Audio streamer ready | pre_pad=%.1fs post_pad=%.1fs "
+            "sil_limit=%d chunks max_phrase=20s",
+            pre_pad, post_pad, self.sil_limit
+        )
+
+    # ── PTT buffer control ────────────────────────────────────────────────────────────
+    def start_ptt(self):
+        with self._ptt_lock:
+            self._ptt_buf.clear()
+            self._ptt_active = True
+        log.debug("PTT raw accumulator: started.")
+
+    def stop_ptt_capture(self) -> Optional[np.ndarray]:
+        with self._ptt_lock:
+            self._ptt_active = False
+            if not self._ptt_buf:
+                log.debug("PTT raw accumulator: empty — nothing captured.")
+                return None
+            audio = np.concatenate(list(self._ptt_buf))
+            self._ptt_buf.clear()
+
+        log.debug("PTT capture: %.2f s of audio", len(audio) / self.RATE)
+
+        if len(audio) < int(0.3 * self.RATE):
+            log.debug("PTT capture: too short, discarding.")
+            return None
+
+        try:
+            audio = nr.reduce_noise(
+                y=audio, sr=self.RATE,
+                stationary=False,
+                prop_decrease=0.75,
+            )
+        except Exception as ex:
+            log.debug("PTT NR failed (non-fatal): %s", ex)
+
+        return audio
+
+    # ── Stream lifecycle ──────────────────────────────────────────────────────────────
+    def start(self):
+        if self.is_running:
+            return
+        self.is_running = True
+        self._stop.clear()
+        threading.Thread(target=self._capture, daemon=True, name="Roy-Audio").start()
+        log.info("Audio streamer started.")
+
+    def stop(self):
+        self.is_running = False
+        self._stop.set()
+
+    def pause(self):
+        self.is_paused = True
+        self._flush_queue()
+
+    def resume(self):
+        self.pre_buf.clear()
+        self._flush_queue()
+        self.is_paused = False
+
+    def _flush_queue(self):
+        flushed = 0
+        while not self.speech_q.empty():
+            try:
+                self.speech_q.get_nowait()
+                flushed += 1
+            except queue.Empty:
+                break
+        if flushed:
+            log.debug("Audio queue flushed (%d segments discarded).", flushed)
+
+    def terminate(self):
+        try:
+            self._stop.set()
+            time.sleep(0.3)
+            self.pa.terminate()
+            log.info("PyAudio terminated.")
+        except Exception as ex:
+            log.warning("PyAudio terminate: %s", ex)
+
+    # ── Capture thread ────────────────────────────────────────────────────────────────
+    def _capture(self):
+        self._stream = None
+        while not self._stop.is_set():
+            try:
+                self._stream = self.pa.open(
+                    format=self.FORMAT, channels=self.CHANNELS,
+                    rate=self.RATE, input=True,
+                    frames_per_buffer=self.CHUNK, start=False,
+                )
+                self._stream.start_stream()
+                log.info("Mic stream opened successfully.")
+                break
+            except Exception as ex:
+                log.warning("Mic open failed: %s — retrying in 2s", ex)
+                time.sleep(2)
+
+        if self._stop.is_set() or self._stream is None:
+            return
+
+        speaking      = False
+        sil_cnt       = 0
+        phrase_buf: List[np.ndarray] = []
+        consecutive_errors           = 0
+
+        while not self._stop.is_set():
+            try:
+                chunk = self._stream.read(self.CHUNK, exception_on_overflow=False)
+                consecutive_errors = 0
+            except OSError as ex:
+                consecutive_errors += 1
+                log.warning("Stream read error #%d: %s", consecutive_errors, ex)
+                time.sleep(0.05)
+                if consecutive_errors > 20:
+                    log.error("Too many consecutive read errors — attempting stream restart.")
+                    try:
+                        self._stream.stop_stream()
+                        self._stream.close()
+                    except Exception:
+                        pass
+                    time.sleep(1)
+                    try:
+                        self._stream = self.pa.open(
+                            format=self.FORMAT, channels=self.CHANNELS,
+                            rate=self.RATE, input=True,
+                            frames_per_buffer=self.CHUNK, start=False,
+                        )
+                        self._stream.start_stream()
+                        consecutive_errors = 0
+                        log.info("Stream restarted successfully.")
+                    except Exception as rex:
+                        log.error("Stream restart failed: %s", rex)
+                        time.sleep(2)
+                continue
+            except Exception as ex:
+                log.debug("Stream read generic error: %s", ex)
+                time.sleep(0.05)
+                continue
+
+            audio_np = np.frombuffer(chunk, np.int16).astype(np.float32) / 32768.0
+            rms      = float(np.sqrt(np.mean(audio_np ** 2)))
+
+            if not self.is_paused:
+                with self._ptt_lock:
+                    if self._ptt_active:
+                        self._ptt_buf.append(audio_np.copy())
+
+            if self.is_paused:
+                continue
+            with self._ptt_lock:
+                if self._ptt_active:
+                    continue
+
+            vad_p = 0.0
+            if self.vad is not None and len(audio_np) == self.CHUNK:
+                with torch.no_grad():
+                    try:
+                        vad_p = self.vad(torch.from_numpy(audio_np), self.RATE).item()
+                    except Exception:
+                        vad_p = 0.0
+
+            is_speech = (vad_p > 0.30) and (rms > 0.001)
+
+            if not speaking:
+                self.pre_buf.append(audio_np)
+                if is_speech:
+                    speaking   = True
+                    phrase_buf = list(self.pre_buf)
+                    self.pre_buf.clear()
+                    sil_cnt    = 0
+            else:
+                phrase_buf.append(audio_np)
+                if is_speech:
+                    sil_cnt = 0
+                else:
+                    sil_cnt += 1
+                    if sil_cnt > self.sil_limit or len(phrase_buf) > self.max_phrase_chunks:
+                        speaking = False
+                        if not self.is_paused and phrase_buf:
+                            full_audio = np.concatenate(phrase_buf)
+                            try:
+                                full_audio = nr.reduce_noise(
+                                    y=full_audio,
+                                    sr=self.RATE,
+                                    stationary=False,
+                                    prop_decrease=0.75,
+                                )
+                            except Exception:
+                                pass
+                            self.speech_q.put(full_audio)
+                        phrase_buf = []
+                        sil_cnt    = 0
+
+    def next_audio(self, timeout: float = 0.5) -> Optional[np.ndarray]:
+        try:
+            return self.speech_q.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════
+# ██  ASYNC WHISPER MANAGER
+# ══════════════════════════════════════════════════════════════════════════════════════
+class AsyncWhisperManager:
+    UNLOADED = "UNLOADED"
+    LOADING  = "LOADING"
+    READY    = "READY"
+    ERROR    = "ERROR"
+
+    def __init__(self):
+        self.model      = None
+        self.state      = self.UNLOADED
+        self._lock      = threading.RLock()
+        self._last_used = time.time()
+        self._stop      = threading.Event()
+        threading.Thread(target=self._watchdog, daemon=True).start()
+        self._load_async()
+
+    def _load_async(self):
+        with self._lock:
+            if self.state in (self.READY, self.LOADING):
+                return
+            self.state = self.LOADING
+        threading.Thread(target=self._load, daemon=True).start()
+
+    def _load(self):
+        try:
+            device       = "cuda" if torch.cuda.is_available() else "cpu"
+            compute_type = "float16" if device == "cuda" else "int8"
+            log.info("Whisper loading: device=%s compute_type=%s", device, compute_type)
+            m = WhisperModel("small", device=device, compute_type=compute_type)
+            with self._lock:
+                self.model      = m
+                self.state      = self.READY
+                self._last_used = time.time()
+            log.info("Whisper model ready [%s/%s].", device, compute_type)
+        except Exception as ex:
+            log.error("Whisper load failed: %s — retrying on CPU/int8", ex)
+            try:
+                m = WhisperModel("small", device="cpu", compute_type="int8")
+                with self._lock:
+                    self.model      = m
+                    self.state      = self.READY
+                    self._last_used = time.time()
+                log.info("Whisper model ready [cpu/int8 fallback].")
+            except Exception as ex2:
+                log.error("Whisper CPU fallback also failed: %s", ex2)
+                with self._lock:
+                    self.state = self.ERROR
+
+    def _watchdog(self):
+        while not self._stop.is_set():
+            time.sleep(10)
+            with self._lock:
+                if self.state != self.READY:
+                    continue
+                if time.time() - self._last_used >= 300:
+                    del self.model
+                    self.model = None
+                    gc.collect()
+                    self.state = self.UNLOADED
+                    log.info("Whisper model unloaded (idle).")
+
+    def get(self) -> Optional[WhisperModel]:
+        with self._lock:
+            if self.state == self.UNLOADED:
+                self._load_async()
+                return None
+            if self.state == self.READY:
+                self._last_used = time.time()
+                return self.model
+            return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════
+# ██  TRANSCRIPTION ENGINE
+# ══════════════════════════════════════════════════════════════════════════════════════
+class _TranscribeEngine:
+    INIT_PROMPT = (
+        "Assistant Roy. Assistant Ray. English speech only. "
+        "Open Chrome, search Google, play music on YouTube, pause video, switch window."
+    )
+
+    def __init__(self, model: WhisperModel, flt: ContextAwareTextFilter):
+        self._model = model
+        self._flt   = flt
+        self._lock  = threading.RLock()
+
+    def transcribe(self, audio: np.ndarray, state: AgentState) -> Optional[str]:
+        with self._lock:
+            try:
+                segs, info = self._model.transcribe(
+                    audio,
+                    task="transcribe",
+                    beam_size=5,
+                    best_of=5,
+                    temperature=0.0,
+                    condition_on_previous_text=False,
+                    no_speech_threshold=0.35,
+                    initial_prompt=self.INIT_PROMPT,
+                    vad_filter=True,
+                    vad_parameters=dict(
+                        min_silence_duration_ms=300,
+                        speech_pad_ms=200,
+                    ),
+                )
+                text = " ".join(s.text.strip() for s in segs).strip()
+                text = re.sub(r"^[\s.,!?]+|[\s.,!?]+$", "", text).strip()
+                conf = info.language_probability
+
+                if info.language != "en":
+                    log.debug(
+                        "Whisper language gate: detected '%s' (prob=%.2f) — discarding.",
+                        info.language, conf
+                    )
+                    return None
+
+            except Exception as ex:
+                log.debug("Whisper transcribe error: %s", ex)
+                return None
+
+        if not text:
+            return None
+
+        ok, final, reason = self._flt.evaluate(text, conf, state)
+        if not ok:
+            log.debug("Text filter rejected: %s — reason: %s", repr(text), reason)
+        return final if ok else None
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════
+# ██  SPEECH ENGINE — public interface over audio + whisper
+# ══════════════════════════════════════════════════════════════════════════════════════
+class SpeechEngine:
+    def __init__(self):
+        self._filter  = ContextAwareTextFilter()
+        self._stream  = StudioGradeAudioStreamer()
+        self._whisper = AsyncWhisperManager()
+        self._engine  = None
+        self._lock    = threading.Lock()
+
+    def start(self):
+        self._stream.start()
+
+    def pause(self):
+        self._stream.pause()
+
+    def resume(self):
+        self._stream.resume()
+
+    def terminate(self):
+        self._stream.terminate()
+
+    def start_ptt(self):
+        self._stream.start_ptt()
+
+    def stop_ptt(self) -> Optional[np.ndarray]:
+        return self._stream.stop_ptt_capture()
+
+    # PATCH 2: removed audio * 2.0 amplifier — Whisper log-mel math fix
+    def next_phrase(self, state: AgentState = AgentState.IDLE) -> Optional[str]:
+        audio = self._stream.next_audio(timeout=0.5)
+        if audio is None:
+            return None
+        # PATCH 2: pass audio directly — no artificial amplification
+        model = self._whisper.get()
+        if model is None:
+            return None
+
+        with self._lock:
+            if self._engine is None or self._engine._model is not model:
+                self._engine = _TranscribeEngine(model, self._filter)
+
+        return self._engine.transcribe(audio, state)
+
+    # PATCH 2: removed audio * 2.0 amplifier — Whisper log-mel math fix
+    def transcribe_raw(self, audio: np.ndarray,
+                       state: AgentState = AgentState.IDLE) -> Optional[str]:
+        if audio is None or len(audio) == 0:
+            return None
+        # PATCH 2: pass audio directly — no artificial amplification
+        model = self._whisper.get()
+        if model is None:
+            log.warning("transcribe_raw: Whisper model not ready yet.")
+            return None
+        with self._lock:
+            if self._engine is None or self._engine._model is not model:
+                self._engine = _TranscribeEngine(model, self._filter)
+        return self._engine.transcribe(audio, state)
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════
+# ██  COMMAND STITCHER
+# ══════════════════════════════════════════════════════════════════════════════════════
+class CommandStitcher:
+    _DANGLE = {
+        "open", "play", "search", "search for", "message", "call",
+        "turn", "set", "type", "look up", "find",
+    }
+
+    def __init__(self):
+        self._buf = ""
+        self._t   = 0.0
+
+    def process(self, text: str) -> Tuple[bool, str]:
+        # PATCH 3: timeout tightened from 7.0s to 3.5s for live stage environment
+        if time.time() - self._t > 3.5:
+            self._buf = ""
+        combined  = f"{self._buf} {text}".strip()
+        self._buf = combined
+        self._t   = time.time()
+        words     = combined.lower().split()
+        if not words:
+            return True, combined
+        lw = words[-1]
+        l2 = " ".join(words[-2:]) if len(words) >= 2 else ""
+        if lw in self._DANGLE or l2 in self._DANGLE:
+            return False, combined
+        self._buf = ""
+        return True, combined
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════
+# ██  WEBSOCKET SERVER
+# ══════════════════════════════════════════════════════════════════════════════════════
+class WebSocketServer:
+    def __init__(self):
+        self._handler_fn: Optional[Callable] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._server = None
+        self._ws_cb: Optional[Callable] = None
+
+    def set_handler(self, fn: Callable):
+        self._handler_fn = fn
+
+    def start(self, ws_online_cb: Optional[Callable] = None):
+        if not HAS_WS:
+            log.warning("websockets library missing — WS server disabled.")
+            return
+        self._ws_cb = ws_online_cb
+        threading.Thread(target=self._run, daemon=True, name="Roy-WS").start()
+
+    def _run(self):
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        try:
+            self._loop.run_until_complete(self._serve())
+        except Exception as ex:
+            log.error("WS loop error: %s", ex)
+
+    async def _serve(self):
+        try:
+            self._server = await websockets.serve(
+                self._on_client, "0.0.0.0", WS_PORT
+            )
+            log.info("WebSocket online  ws://0.0.0.0:%d", WS_PORT)
+            rprint("WS", f"Server live on port {WS_PORT}", "green")
+            if self._ws_cb:
+                self._ws_cb(True)
+            await self._server.wait_closed()
+        except OSError as ex:
+            log.error("WS bind failed port %d: %s", WS_PORT, ex)
+            if self._ws_cb:
+                self._ws_cb(False)
+        except Exception as ex:
+            log.error("WS serve error: %s", ex)
+
+    async def _on_client(self, ws, path=None):
+        addr = getattr(ws, "remote_address", "unknown")
+        log.info("WS client connected: %s", addr)
+        try:
+            async for message in ws:
+                rprint("WS←", str(message)[:100], "yellow")
+                if self._handler_fn:
+                    loop   = asyncio.get_event_loop()
+                    result = await loop.run_in_executor(
+                        None, self._handler_fn, message
+                    )
+                    await ws.send(json.dumps(result, ensure_ascii=False))
+        except websockets.exceptions.ConnectionClosed:
+            log.info("WS client disconnected: %s", addr)
+        except Exception as ex:
+            log.error("WS client error [%s]: %s", addr, ex)
+
+    def shutdown(self):
+        if self._server and self._loop:
+            self._loop.call_soon_threadsafe(self._server.close)
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════
+# ██  OMNI ASSISTANT — Master Orchestrator  v15
+# ══════════════════════════════════════════════════════════════════════════════════════
+class OmniAssistant:
+    _EXPLICIT = {
+        "porn", "sex", "xxx", "nsfw", "nude", "boob", "boobs", "ass",
+        "fuck", "bitch", "shit", "tits", "dick", "pussy",
+    }
+    _LOCKED = {
+        "shutdown", "restart", "sleep", "logoff", "hibernate", "self_destruct",
+    }
+
+    _PTT_IDLE      = "PTT_IDLE"
+    _PTT_LISTENING = "PTT_LISTENING"
+
+    def __init__(self, root: tk.Tk, gui: RoyOrb):
+        self.root    = root
+        self.gui     = gui
+        self.tts     = TTSEngine()
+        self.brain   = RoyBrain()
+        self.speech  = SpeechEngine()
+        self.wake    = WakeWordDetector()
+        self.stitch  = CommandStitcher()
+        self.sysinfo = SystemInfo()
+        self.launch  = AppLauncher()
+        self.remind  = ReminderModule(self.tts, self._remind_cb)
+        self.actions = ActionDispatcher(self.launch, self.sysinfo, self.remind)
+        self.ws      = WebSocketServer()
+
+        self._last_dialogue = ""
+        self._cmd_hist      = collections.deque(maxlen=30)
+        self._processing    = False
+
+        self._ptt_state      = self._PTT_IDLE
+        self._ptt_last_press = 0.0
+        self._ptt_lock       = threading.Lock()
+
+        self._banner()
+        self.gui.append_text("SYS", "Project E.G.O. v15 online. Roy is watching.")
+        self.tts.speak_async("Systems online. Try to keep up.")
+
+        self.ws.set_handler(self.handle_signal)
+        self.ws.start(ws_online_cb=self.gui.set_ws_online)
+
+        self._bind_ptt_hotkey()
+
+    # ── PTT Hotkey Binding ────────────────────────────────────────────────────────────
+    def _bind_ptt_hotkey(self):
+        if not HAS_KEYBOARD:
+            log.warning("PTT hotkey disabled: keyboard library not found.")
+            return
+        try:
+            keyboard.on_press_key("space", self._on_space_press, suppress=False)
+            log.info("PTT hotkey bound: Spacebar (suppress=False)")
+        except Exception as ex:
+            log.error("Failed to bind PTT hotkey: %s", ex)
+
+    def _on_space_press(self, _event=None):
+        now = time.time()
+        with self._ptt_lock:
+            if now - self._ptt_last_press < 0.5:
+                self._ptt_last_press = 0.0
+                threading.Thread(target=self._kill_switch, daemon=True).start()
+                return
+            self._ptt_last_press = now
+
+        threading.Thread(target=self._handle_ptt_press, args=(now,), daemon=True).start()
+
+    def _handle_ptt_press(self, press_time: float):
+        time.sleep(0.1)
+        with self._ptt_lock:
+            if self._ptt_last_press != press_time:
+                return
+            current = self._ptt_state
+
+        if current == self._PTT_IDLE:
+            self._ptt_start_force_listen()
+        elif current == self._PTT_LISTENING:
+            self._ptt_stop_and_transcribe()
+
+    def _ptt_start_force_listen(self):
+        with self._ptt_lock:
+            self._ptt_state = self._PTT_LISTENING
+        self.speech.resume()
+        self.speech.start_ptt()
+        self.gui.set_status("● LISTENING [PTT — PRESS SPACE TO SEND]")
+        rprint("PTT", "Force listening started (raw accumulator active).", "cyan")
+
+    def _ptt_stop_and_transcribe(self):
+        with self._ptt_lock:
+            self._ptt_state = self._PTT_IDLE
+
+        audio = self.speech.stop_ptt()
+        self.speech.pause()
+        self.gui.set_status("⚙ PROCESSING [PTT]...")
+        rprint("PTT", "Force listening stopped. Transcribing.", "yellow")
+
+        if audio is None:
+            self.gui.append_text("SYS", "PTT: no audio captured.")
+            self.gui.set_status("● LISTENING")
+            time.sleep(0.3)
+            self.speech.resume()
+            return
+
+        text = self.speech.transcribe_raw(audio)
+        if not text:
+            self.gui.append_text("SYS", "PTT: could not transcribe — speak clearly and try again.")
+            self.gui.set_status("● LISTENING")
+            time.sleep(0.3)
+            self.speech.resume()
+            return
+
+        rprint("PTT", f"Transcribed: {text}", "green")
+        ok, final = self.stitch.process(text)
+        if final.strip():
+            threading.Thread(
+                target=self._safe_handle, args=(final,), daemon=True
+            ).start()
+        else:
+            self.gui.set_status("● LISTENING")
+            time.sleep(0.3)
+            self.speech.resume()
+
+    def _kill_switch(self):
+        rprint("KILL", "Kill switch activated — aborting everything.", "red")
+        self.gui.set_status("⚠ KILL SWITCH FIRED")
+
+        self.speech.stop_ptt()
+        self.speech.pause()
+        self.tts.stop_current()
+        self.brain.abort()
+
+        self._processing = False
+        with self._ptt_lock:
+            self._ptt_state = self._PTT_IDLE
+
+        self.gui.append_text("SYS", "Kill switch fired. All systems reset.")
+
+        time.sleep(0.3)
+        self.speech.resume()
+        self.gui.set_status("● LISTENING")
+        rprint("KILL", "System reset to IDLE.", "green")
+
+    # ── Voice Loop ────────────────────────────────────────────────────────────────────
+    def listen_loop(self):
+        self.speech.start()
+        log.info("Voice pipeline active. Awaiting wake word.")
+
+        while True:
+            with self._ptt_lock:
+                if self._ptt_state == self._PTT_LISTENING:
+                    time.sleep(0.05)
+                    continue
+
+            text = self.speech.next_phrase(AgentState.IDLE)
+            if text is None:
+                continue
+
+            if self.wake.contains(text):
+                cmd = self.wake.strip_wake(text)
+                ok, final = self.stitch.process(cmd)
+                if not ok:
+                    continue
+
+                self.speech.pause()
+
+                if not final.strip():
+                    prompt = random.choice([
+                        "Yes? State your query.",
+                        "I am listening. Make it worthwhile.",
+                        "Speak. I do not enjoy waiting.",
+                    ])
+                    self._say(prompt)
+                    time.sleep(0.3)
+                    self.speech.resume()
+                    continue
+
+                threading.Thread(
+                    target=self._safe_handle, args=(final,), daemon=True
+                ).start()
+
+    def _safe_handle(self, query: str):
+        try:
+            self._processing = True
+            self.gui.set_status("⚙ PROCESSING...")
+            self.handle_query(query)
+        except Exception as ex:
+            log.error("handle_query crash: %s\n%s", ex, traceback.format_exc())
+            err = "A subroutine catastrophe. Repeat your query."
+            self._say(err, "ERROR")
+        finally:
+            self._processing = False
+            self.gui.set_status("● LISTENING")
+            time.sleep(0.3)
+            self.speech.resume()
+
+    # ── Core Query Handler (Voice) ────────────────────────────────────────────────────
+    def handle_query(self, query: str):
+        q = query.lower().strip()
+        self.gui.append_text("USER", query)
+        self._cmd_hist.append(query)
+        rprint("YOU", query, "cyan")
+
+        if any(w in q for w in self._EXPLICIT):
+            self._say(
+                "Keep it appropriate. I refuse to be your search engine for that.", "ROY"
+            ); return
+
+        if re.match(r"^(repeat|again|say\s*that\s*again)\b", q, re.I):
+            self._say(self._last_dialogue or "Nothing to repeat yet."); return
+
+        if re.match(r"^(clear|reset)\s*(memory|history|context)\b", q, re.I):
+            self.brain.clear_history()
+            resp = self.brain.clear_memory_response()
+            self._say(resp["dialogue"]); return
+
+        result   = self.brain.query(query)
+        action   = result.get("action", "none")
+        dialogue = result.get("dialogue", "...")
+
+        if action in self._LOCKED:
+            dialogue = "That action is locked for safety. Nice attempt."
+            action   = "none"
+
+        override = self.actions.execute(action, query)
+        if override:
+            dialogue = override
+
+        if HAS_PYPERCLIP:
+            ActionDispatcher._auto_clipboard(dialogue)
+
+        rprint("ROY", f"[{action}]  {dialogue}", "magenta")
+        self._say(dialogue)
+
+    # ── WebSocket Signal Handler ──────────────────────────────────────────────────────
+    def handle_signal(self, signal: str) -> dict:
+        q = signal.strip()
+        if not q:
+            return {"action": "none", "dialogue": "Empty signal.", "status": "error"}
+
+        self.gui.append_text("USER", f"[WS] {q}")
+        self.gui.set_status("⚙ WS PROCESSING...")
+        rprint("WS-SIG", q, "yellow")
+
+        self.speech.pause()
+
+        if any(w in q.lower() for w in self._EXPLICIT):
+            resp = "Inappropriate signal. Rejected."
+            self.gui.append_text("ROY", resp)
+            self.gui.set_status("● LISTENING")
+            self.speech.resume()
+            return {"action": "none", "dialogue": resp, "status": "rejected"}
+
+        result   = self.brain.query(q)
+        action   = result.get("action", "none")
+        dialogue = result.get("dialogue", "...")
+
+        if action in self._LOCKED:
+            dialogue = "That action is locked."
+            action   = "none"
+
+        override = self.actions.execute(action, q)
+        if override:
+            dialogue = override
+
+        if HAS_PYPERCLIP:
+            ActionDispatcher._auto_clipboard(dialogue)
+
+        self.gui.append_text("ROY", dialogue)
+        self.gui.set_status("◉ SPEAKING...")
+        rprint("WS-RSP", f"[{action}]  {dialogue}", "green")
+
+        # PATCH 1: speak() is blocking — mic stays paused until TTS is fully done,
+        # eliminating the echo loop that speak_async() caused in v14.
+        self.tts.speak(dialogue)
+
+        self.gui.set_status("● LISTENING")
+        time.sleep(0.3)
+        self.speech.resume()
+
+        return {"action": action, "dialogue": dialogue, "status": "ok"}
+
+    # ── Helpers ───────────────────────────────────────────────────────────────────────
+    def _say(self, text: str, speaker: str = "ROY"):
+        self._last_dialogue = text
+        self.gui.append_text(speaker, text)
+        self.gui.set_status("◉ SPEAKING...")
+        self.tts.speak(text)
+        self.gui.set_status("● LISTENING")
+
+    def _remind_cb(self, text: str):
+        self.gui.append_text("SYS", text)
+        rprint("REMINDER", text, "yellow")
+
+    def graceful_shutdown(self):
+        log.info("Graceful shutdown initiated...")
+
+        if HAS_KEYBOARD:
+            try:
+                keyboard.unhook_all()
+                log.info("Keyboard hooks unbound.")
+            except Exception as ex:
+                log.warning("Keyboard unhook: %s", ex)
+
+        try:
+            self.tts.stop_current()
+        except Exception:
+            pass
+
+        self.brain.abort()
+
+        try:
+            self.ws.shutdown()
+        except Exception as ex:
+            log.warning("WS shutdown: %s", ex)
+
+        try:
+            self.speech.terminate()
+        except Exception as ex:
+            log.warning("Speech terminate: %s", ex)
+
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+
+        log.info("Shutdown complete. Exiting.")
+        os._exit(0)
+
+    @staticmethod
+    def _banner():
+        lines = [
+            "╔══════════════════════════════════════════════════════════════╗",
+            "║   R O Y  /  R A Y  —  PROJECT  E.G.O.   v15.0               ║",
+            f"║   Brain    Llama-3.2-3B via LM Studio · Conversational Mem   ║",
+            f"║   Audio    Silero VAD + Phrase-NR + Whisper CUDA/CPU         ║",
+            f"║   Channel  Wake-Word Voice  +  WebSocket ws://::{WS_PORT}        ║",
+            f"║   PTT      Spacebar (single=toggle, double=kill)             ║",
+            f"║   Voice    SAPI5 @ 215wpm · absspeed=-2 · 1.15× deep pitch   ║",
+            f"║   Guards   English-only gate · Action Validator              ║",
+            f"║   v15Fix   WS blocking TTS · No amplifier · 3.5s stitch      ║",
+            f"║            endLoop() kill · Updated PTT label                ║",
+            "╚══════════════════════════════════════════════════════════════╝",
+        ]
+        if HAS_RICH and _rich:
+            _rich.print(Panel("\n".join(lines), style="bold magenta", box=rbox.MINIMAL))
+        else:
+            print("\n".join(lines))
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════
+# ██  CRASH HANDLER
+# ══════════════════════════════════════════════════════════════════════════════════════
+class CrashHandler:
+    LOG_FILE = "roy_crash.log"
+
+    def __init__(self):
+        sys.excepthook = self._hook
+
+    def _hook(self, et, ev, etb):
+        if issubclass(et, KeyboardInterrupt):
+            sys.__excepthook__(et, ev, etb)
+            return
+        tb = "".join(traceback.format_exception(et, ev, etb))
+        try:
+            with open(self.LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(f"\n[{datetime.datetime.now()}]\n{tb}\n")
+        except Exception:
+            pass
+        log.critical("Unhandled exception — see %s", self.LOG_FILE)
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════
+# ██  MAIN
+# ══════════════════════════════════════════════════════════════════════════════════════
 def main():
-    print("\n" + "═" * 62)
-    print("  R A Y  /  R O Y   —   v7.9   EXPO APEX ONLINE")
-    print("  Brain  : Llama-3.2-3B-Instruct via LM Studio")
-    print("  Audio  : Silero VAD + PyTorch Denoise Shield")
-    print("  Mode   : UI Watchdog + Context IQ + Fuzzy Logic")
-    print("═" * 62 + "\n")
+    CrashHandler()
 
     root = tk.Tk()
     root.withdraw()
-    root.title("RAY-AGENT")
+    root.title("ROY-EGO v15")
 
-    gui       = RayRoyOverlay(root)
+    gui       = RoyOrb(root)
     assistant = OmniAssistant(root, gui)
-    diag      = AutoDiagnosticsManager(assistant.tts, assistant.llm)
 
-    def listen_monitor():
+    gui.win.protocol("WM_DELETE_WINDOW", assistant.graceful_shutdown)
+    root.protocol("WM_DELETE_WINDOW",    assistant.graceful_shutdown)
+
+    def _monitor():
         while True:
             try:
                 assistant.listen_loop()
-            except Exception as e:
-                diag.handle_exception(type(e), e, e.__traceback__)
+            except KeyboardInterrupt:
+                break
+            except Exception as ex:
+                log.error("Listen loop crashed: %s — restarting in 3s", ex)
                 time.sleep(3)
 
-    threading.Thread(target=listen_monitor, daemon=True, name="Agent-Listen-Monitor").start()
+    threading.Thread(target=_monitor, daemon=True, name="Roy-Listen").start()
 
     try:
         root.mainloop()
     except KeyboardInterrupt:
-        log.info("Agent shutting down.")
+        log.info("Roy signing off.")
     finally:
-        os._exit(0)
+        assistant.graceful_shutdown()
+
 
 if __name__ == "__main__":
     main()
