@@ -1,0 +1,18 @@
+# Core Dependencies for Project E.G.O. / Roy Agent
+numpy
+psutil
+pyaudio
+pyautogui
+pywhatkit
+pyttsx3
+requests
+faster-whisper
+torch
+noisereduce
+screen-brightness-control
+pystray
+Pillow
+pywin32; sys_platform == 'win32'
+websockets
+mne
+keyboard
