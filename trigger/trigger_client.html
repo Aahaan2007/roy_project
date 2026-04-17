@@ -1,0 +1,663 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>E.G.O. SSVEP Trigger Station</title>
+    <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700&display=swap"
+        rel="stylesheet" />
+    <style>
+        *,
+        *::before,
+        *::after {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        :root {
+            --ego-bg: #0a0d11;
+            --ego-surface: #111520;
+            --ego-panel: #161b28;
+            --ego-border: #1e2a3a;
+            --ego-accent: #00d4ff;
+            --ego-accent2: #7b5ea7;
+            --ego-warn: #f0a500;
+            --ego-text: #c8d8e8;
+            --ego-muted: #4a5e72;
+            --ego-success: #00e57a;
+            --ego-error: #ff4d6a;
+            --font-mono: 'Share Tech Mono', monospace;
+            --font-display: 'Orbitron', monospace;
+        }
+
+        body {
+            background: var(--ego-bg);
+            color: var(--ego-text);
+            font-family: var(--font-mono);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px 16px;
+        }
+
+        .frame {
+            width: 100%;
+            max-width: 560px;
+        }
+
+        /* ── Top border bar ── */
+        .border-top-bar {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 2px;
+            color: var(--ego-accent);
+            font-size: 11px;
+            letter-spacing: 2px;
+        }
+
+        .border-line {
+            flex: 1;
+            height: 1px;
+            background: linear-gradient(90deg, var(--ego-accent) 0%, var(--ego-accent2) 60%, transparent 100%);
+        }
+
+        .corner-bracket {
+            font-size: 14px;
+            color: var(--ego-accent2);
+        }
+
+        /* ── Header ── */
+        .header {
+            background: var(--ego-surface);
+            border: 1px solid var(--ego-border);
+            border-top: 2px solid transparent;
+            padding: 20px 24px 16px;
+            position: relative;
+        }
+
+        .header::before {
+            content: '';
+            position: absolute;
+            top: -2px;
+            left: -1px;
+            right: -1px;
+            height: 2px;
+            background: linear-gradient(90deg, var(--ego-accent), var(--ego-accent2));
+        }
+
+        .header-sub {
+            font-size: 10px;
+            color: var(--ego-muted);
+            letter-spacing: 4px;
+            text-transform: uppercase;
+            margin-bottom: 4px;
+        }
+
+        .header-title {
+            font-family: var(--font-display);
+            font-size: 18px;
+            font-weight: 700;
+            color: var(--ego-accent);
+            letter-spacing: 3px;
+        }
+
+        .header-badge {
+            position: absolute;
+            right: 24px;
+            top: 50%;
+            transform: translateY(-50%);
+            text-align: right;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .pulse-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--ego-muted);
+            transition: background 0.3s;
+        }
+
+        .pulse-dot.online {
+            background: var(--ego-success);
+            animation: pulse 1.5s ease-in-out infinite;
+        }
+
+        .conn-label {
+            font-size: 10px;
+            letter-spacing: 2px;
+            color: var(--ego-muted);
+            transition: color 0.3s;
+        }
+
+        .conn-label.online {
+            color: var(--ego-success);
+        }
+
+        @keyframes pulse {
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.3;
+            }
+        }
+
+        /* ── Section divider ── */
+        .divider-label {
+            background: var(--ego-surface);
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 8px 24px;
+            border: 1px solid var(--ego-border);
+            border-top: none;
+            font-size: 9px;
+            color: var(--ego-muted);
+            letter-spacing: 3px;
+            text-transform: uppercase;
+        }
+
+        .divider-label::before,
+        .divider-label::after {
+            content: '';
+            flex: 1;
+            height: 1px;
+            background: var(--ego-border);
+        }
+
+        /* ── Key rows ── */
+        .keys-panel {
+            background: var(--ego-panel);
+            border: 1px solid var(--ego-border);
+            border-top: none;
+        }
+
+        .key-row {
+            display: flex;
+            align-items: center;
+            padding: 11px 24px;
+            cursor: pointer;
+            border-left: 3px solid transparent;
+            transition: background 0.08s, border-left-color 0.08s;
+            user-select: none;
+        }
+
+        .key-row+.key-row {
+            border-top: 1px solid rgba(30, 42, 58, 0.5);
+        }
+
+        .key-row:hover {
+            background: rgba(0, 212, 255, 0.04);
+            border-left-color: var(--ego-accent2);
+        }
+
+        .key-row.active {
+            background: rgba(0, 212, 255, 0.1);
+            border-left-color: var(--ego-accent);
+            animation: rowflash 0.35s ease-out;
+        }
+
+        @keyframes rowflash {
+            0% {
+                background: rgba(0, 212, 255, 0.22);
+            }
+
+            100% {
+                background: rgba(0, 212, 255, 0.1);
+            }
+        }
+
+        .key-badge {
+            width: 28px;
+            height: 28px;
+            flex-shrink: 0;
+            background: var(--ego-surface);
+            border: 1px solid var(--ego-border);
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-family: var(--font-display);
+            font-size: 12px;
+            color: var(--ego-accent);
+            transition: border-color 0.08s, box-shadow 0.08s;
+        }
+
+        .key-row.active .key-badge {
+            border-color: var(--ego-accent);
+            box-shadow: 0 0 8px rgba(0, 212, 255, 0.4);
+        }
+
+        .key-freq {
+            font-size: 12px;
+            color: var(--ego-warn);
+            letter-spacing: 1px;
+            width: 52px;
+            text-align: right;
+            margin-left: 14px;
+            flex-shrink: 0;
+        }
+
+        .key-sep {
+            color: var(--ego-border);
+            margin: 0 14px;
+            font-size: 14px;
+        }
+
+        .key-action {
+            flex: 1;
+            font-size: 13px;
+            color: var(--ego-text);
+            letter-spacing: 1px;
+        }
+
+        .key-arrow {
+            font-size: 10px;
+            color: var(--ego-muted);
+            opacity: 0;
+            transition: opacity 0.15s;
+        }
+
+        .key-row:hover .key-arrow,
+        .key-row.active .key-arrow {
+            opacity: 1;
+            color: var(--ego-accent);
+        }
+
+        /* ── Connection panel ── */
+        .conn-panel {
+            background: var(--ego-surface);
+            border: 1px solid var(--ego-border);
+            border-top: none;
+            padding: 14px 24px;
+        }
+
+        .conn-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+
+        .conn-row:last-child {
+            margin-bottom: 0;
+        }
+
+        .field-label {
+            font-size: 10px;
+            color: var(--ego-muted);
+            letter-spacing: 2px;
+            width: 80px;
+            flex-shrink: 0;
+        }
+
+        .conn-input {
+            flex: 1;
+            background: var(--ego-panel);
+            border: 1px solid var(--ego-border);
+            border-radius: 4px;
+            color: var(--ego-accent);
+            font-family: var(--font-mono);
+            font-size: 12px;
+            padding: 6px 10px;
+            outline: none;
+            transition: border-color 0.15s;
+        }
+
+        .conn-input:focus {
+            border-color: var(--ego-accent);
+        }
+
+        .conn-input:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+
+        .port-input {
+            width: 72px;
+            flex: none;
+        }
+
+        .ws-preview {
+            flex: 1;
+            font-size: 11px;
+            color: var(--ego-muted);
+            letter-spacing: 1px;
+        }
+
+        .conn-btn {
+            background: transparent;
+            border: 1px solid var(--ego-accent2);
+            border-radius: 4px;
+            color: var(--ego-accent2);
+            font-family: var(--font-mono);
+            font-size: 10px;
+            padding: 7px 16px;
+            cursor: pointer;
+            letter-spacing: 2px;
+            transition: background 0.1s, color 0.1s;
+        }
+
+        .conn-btn:hover {
+            background: var(--ego-accent2);
+            color: #fff;
+        }
+
+        .conn-btn.disc {
+            border-color: var(--ego-error);
+            color: var(--ego-error);
+        }
+
+        .conn-btn.disc:hover {
+            background: var(--ego-error);
+            color: #fff;
+        }
+
+        /* ── Status bar ── */
+        .status-bar {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 9px 24px;
+            background: var(--ego-bg);
+            border: 1px solid var(--ego-border);
+            border-top: none;
+            font-size: 10px;
+            color: var(--ego-muted);
+            letter-spacing: 1.5px;
+            min-height: 38px;
+        }
+
+        #status-msg {
+            transition: color 0.2s;
+        }
+
+        #status-msg.ok {
+            color: var(--ego-success);
+        }
+
+        #status-msg.err {
+            color: var(--ego-error);
+        }
+
+        #status-msg.send {
+            color: var(--ego-accent);
+        }
+
+        /* ── Log ── */
+        .log-panel {
+            background: var(--ego-bg);
+            border: 1px solid var(--ego-border);
+            border-top: none;
+            padding: 8px 24px;
+            max-height: 96px;
+            overflow-y: auto;
+            font-size: 10px;
+            color: var(--ego-muted);
+            letter-spacing: 1px;
+            display: none;
+        }
+
+        .log-panel.show {
+            display: block;
+        }
+
+        .log-entry {
+            margin-bottom: 3px;
+        }
+
+        .log-entry.sent {
+            color: var(--ego-accent);
+        }
+
+        .log-entry.recv {
+            color: var(--ego-success);
+        }
+
+        .log-entry.err {
+            color: var(--ego-error);
+        }
+
+        .log-entry.info {
+            color: var(--ego-warn);
+        }
+
+        /* ── Footer ── */
+        .footer {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-top: 2px;
+            color: var(--ego-muted);
+            font-size: 10px;
+            letter-spacing: 2px;
+            padding: 0 4px;
+        }
+
+        .border-line-b {
+            flex: 1;
+            height: 1px;
+            background: linear-gradient(90deg, transparent, var(--ego-accent2) 40%, var(--ego-accent) 100%);
+        }
+    </style>
+</head>
+
+<body>
+    <div class="frame">
+
+        <!-- Top border -->
+        <div class="border-top-bar">
+            <span class="corner-bracket">[</span>
+            <span class="border-line"></span>
+            <span>E.G.O. SSVEP</span>
+            <span class="border-line"></span>
+            <span class="corner-bracket">]</span>
+        </div>
+
+        <!-- Header -->
+        <div class="header">
+            <div class="header-sub">Neural Interface System</div>
+            <div class="header-title">TRIGGER STATION</div>
+            <div class="header-badge">
+                <div class="pulse-dot" id="dot"></div>
+                <span class="conn-label" id="conn-badge">OFFLINE</span>
+            </div>
+        </div>
+
+        <!-- Key mapping -->
+        <div class="divider-label">key mapping</div>
+        <div class="keys-panel" id="keys-panel">
+            <div class="key-row" data-key="1" data-freq="7" data-action="Open Notepad">
+                <div class="key-badge">1</div>
+                <div class="key-freq">7 Hz</div>
+                <div class="key-sep">—</div>
+                <div class="key-action">Open Notepad</div>
+                <div class="key-arrow">▶</div>
+            </div>
+            <div class="key-row" data-key="2" data-freq="10" data-action="Google Search">
+                <div class="key-badge">2</div>
+                <div class="key-freq">10 Hz</div>
+                <div class="key-sep">—</div>
+                <div class="key-action">Google Search</div>
+                <div class="key-arrow">▶</div>
+            </div>
+            <div class="key-row" data-key="3" data-freq="12" data-action="Play YouTube">
+                <div class="key-badge">3</div>
+                <div class="key-freq">12 Hz</div>
+                <div class="key-sep">—</div>
+                <div class="key-action">Play YouTube</div>
+                <div class="key-arrow">▶</div>
+            </div>
+            <div class="key-row" data-key="4" data-freq="15" data-action="Take Screenshot">
+                <div class="key-badge">4</div>
+                <div class="key-freq">15 Hz</div>
+                <div class="key-sep">—</div>
+                <div class="key-action">Take Screenshot</div>
+                <div class="key-arrow">▶</div>
+            </div>
+            <div class="key-row" data-key="5" data-freq="20" data-action="System Status">
+                <div class="key-badge">5</div>
+                <div class="key-freq">20 Hz</div>
+                <div class="key-sep">—</div>
+                <div class="key-action">System Status</div>
+                <div class="key-arrow">▶</div>
+            </div>
+        </div>
+
+        <!-- Connection -->
+        <div class="divider-label">connection</div>
+        <div class="conn-panel">
+            <div class="conn-row">
+                <div class="field-label">SERVER IP</div>
+                <input class="conn-input" id="ip" type="text" value="192.168.1.100" spellcheck="false" />
+                <input class="conn-input port-input" id="port" type="text" value="8766" spellcheck="false" />
+            </div>
+            <div class="conn-row">
+                <div class="field-label">WEBSOCKET</div>
+                <div class="ws-preview" id="ws-preview">ws://192.168.1.100:8766</div>
+                <button class="conn-btn" id="toggle-btn" onclick="toggleConn()">CONNECT</button>
+            </div>
+        </div>
+
+        <!-- Status -->
+        <div class="status-bar">
+            <span>SYS</span>
+            <span style="color:var(--ego-border)">›</span>
+            <span id="status-msg">Press CONNECT to begin session</span>
+        </div>
+
+        <!-- Log -->
+        <div class="log-panel" id="log"></div>
+
+        <!-- Footer -->
+        <div class="footer">
+            <span class="border-line-b"></span>
+            <span>SSVEP · BCI · v1.0</span>
+            <span class="border-line-b" style="transform:scaleX(-1)"></span>
+        </div>
+
+    </div>
+    <script>
+        let ws = null, connected = false;
+
+        const keyMap = {
+            '1': { freq: 7 }, '2': { freq: 10 },
+            '3': { freq: 12 }, '4': { freq: 15 }, '5': { freq: 20 }
+        };
+
+        const $ip = document.getElementById('ip');
+        const $port = document.getElementById('port');
+        const $preview = document.getElementById('ws-preview');
+        const $dot = document.getElementById('dot');
+        const $badge = document.getElementById('conn-badge');
+        const $btn = document.getElementById('toggle-btn');
+        const $status = document.getElementById('status-msg');
+        const $log = document.getElementById('log');
+
+        function wsUrl() { return `ws://${$ip.value.trim()}:${$port.value.trim()}`; }
+
+        [$ip, $port].forEach(el => el.addEventListener('input', () => $preview.textContent = wsUrl()));
+
+        function setStatus(msg, cls) {
+            $status.textContent = msg;
+            $status.className = cls || '';
+        }
+
+        function log(msg, cls) {
+            $log.classList.add('show');
+            const d = document.createElement('div');
+            d.className = 'log-entry ' + (cls || '');
+            const t = new Date().toTimeString().slice(0, 8);
+            d.textContent = `[${t}] ${msg}`;
+            $log.appendChild(d);
+            $log.scrollTop = $log.scrollHeight;
+            if ($log.children.length > 50) $log.removeChild($log.firstChild);
+        }
+
+        function setOnline(on) {
+            connected = on;
+            $dot.className = 'pulse-dot' + (on ? ' online' : '');
+            $badge.className = 'conn-label' + (on ? ' online' : '');
+            $badge.textContent = on ? 'ONLINE' : 'OFFLINE';
+            $btn.textContent = on ? 'DISCONNECT' : 'CONNECT';
+            $btn.className = 'conn-btn' + (on ? ' disc' : '');
+            $ip.disabled = $port.disabled = on;
+        }
+
+        function toggleConn() {
+            if (connected) {
+                ws && ws.close();
+                ws = null;
+                setOnline(false);
+                setStatus('Disconnected', '');
+                log('Session closed', 'info');
+            } else {
+                const url = wsUrl();
+                setStatus('Connecting to ' + url + ' …', '');
+                log('Connecting to ' + url, 'info');
+                try { ws = new WebSocket(url); }
+                catch (e) { setStatus('Invalid URL', 'err'); return; }
+
+                ws.onopen = () => {
+                    setOnline(true);
+                    setStatus('Connected · ' + url + ' · Press 1–5 to trigger', 'ok');
+                    log('Connected', 'recv');
+                    const reg = JSON.stringify({ type: 'register', role: 'trigger' });
+                    ws.send(reg);
+                    log('Sent: ' + reg, 'sent');
+                };
+                ws.onmessage = e => {
+                    log('Recv: ' + e.data, 'recv');
+                };
+                ws.onerror = () => {
+                    setStatus('Connection error — check IP & port', 'err');
+                    log('WebSocket error', 'err');
+                    setOnline(false); ws = null;
+                };
+                ws.onclose = () => {
+                    if (connected) {
+                        setOnline(false);
+                        setStatus('Connection lost — reconnect to resume', 'err');
+                        log('Connection closed', 'err');
+                        ws = null;
+                    }
+                };
+            }
+        }
+
+        function trigger(key) {
+            if (!connected || !ws) { setStatus('Not connected — press CONNECT first', 'err'); return; }
+            const { freq } = keyMap[key];
+            const payload = JSON.stringify({ type: 'trigger', frequency: freq, key: String(key) });
+            ws.send(payload);
+            setStatus(`Sent [${key}] → ${freq} Hz`, 'send');
+            log('Sent: ' + payload, 'sent');
+            document.querySelectorAll('.key-row').forEach(r => {
+                if (r.dataset.key === key) {
+                    r.classList.add('active');
+                    setTimeout(() => r.classList.remove('active'), 350);
+                }
+            });
+        }
+
+        document.querySelectorAll('.key-row').forEach(r =>
+            r.addEventListener('click', () => trigger(r.dataset.key))
+        );
+
+        document.addEventListener('keydown', e => {
+            if (keyMap[e.key]) trigger(e.key);
+        });
+    </script>
+</body>
+
+</html>
